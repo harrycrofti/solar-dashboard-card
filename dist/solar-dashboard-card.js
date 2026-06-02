@@ -10,7 +10,7 @@
  * License: MIT
  */
 
-const CARD_VERSION = "1.3.0";
+const CARD_VERSION = "1.4.0";
 
 /* eslint-disable no-console */
 console.info(
@@ -97,10 +97,19 @@ const DEFAULTS = {
   poll_interval: 10, // seconds
   use_rest: false, // optional /api/states REST polling
 
-  // Appearance — flow-dot colours
+  // Appearance — flow-dot colours.
+  // These are the per-"kind" defaults; override any individual direction in
+  // flow_colors (keys: solar_home, solar_battery, solar_grid, battery_home,
+  // grid_home, grid_battery, battery_grid).
   flow_power_color: "#21e065", // green: generation / supply
   flow_consumption_color: "#ffc233", // amber: grid draw to home
-  flow_battery_grid_color: "#7c5cff", // violet: grid<->battery (charge from / export to grid)
+  flow_battery_grid_color: "#7c5cff", // violet: grid<->battery
+  flow_colors: {}, // per-direction overrides
+
+  // Home is rendered as a glow over the house (no node bubble).
+  home_glow_enabled: true,
+  home_glow_color: "#ffcf6b", // warm glow when the home is consuming
+  home_glow: { x: 46, y: 36, w: 58, h: 52 }, // centre + size, % of the image
 
   // Statistics & graphs (today, from local midnight)
   show_graphs: true,
@@ -126,12 +135,14 @@ const DEFAULTS = {
     lightning_rainy_night: "/local/Night Thunderstorm.png",
   },
 
-  // Node positions in percentages of the image (0-100)
+  // Node positions in percentages of the image (0-100).
+  // Defaults tuned to the reference house image; "home" is now just the
+  // invisible anchor the home-bound flow lines converge on (no bubble).
   nodes: {
-    solar: { x: 45, y: 18 },
-    home: { x: 50, y: 58 },
-    battery: { x: 76, y: 53 },
-    grid: { x: 90, y: 30 },
+    solar: { x: 36, y: 21 }, // roof solar panels
+    home: { x: 46, y: 40 }, // house centre (flow anchor)
+    battery: { x: 29, y: 50 }, // wall battery unit
+    grid: { x: 18, y: 34 }, // power pole
   },
 };
 
@@ -183,6 +194,8 @@ class SolarDashboardCard extends HTMLElement {
       },
       grid: { ...DEFAULTS.nodes.grid, ...((config.nodes || {}).grid || {}) },
     };
+    merged.home_glow = { ...DEFAULTS.home_glow, ...(config.home_glow || {}) };
+    merged.flow_colors = { ...(config.flow_colors || {}) };
     this._config = this._resolveEntities(merged);
     this._built = false; // force rebuild
     if (this.shadowRoot) this.shadowRoot.innerHTML = "";
@@ -473,6 +486,20 @@ class SolarDashboardCard extends HTMLElement {
     return `M ${a.x} ${a.y} L ${b.x} ${b.y}`;
   }
 
+  /** Per-direction colour, falling back to the kind default. */
+  _resolveFlowColor(f) {
+    const C = this._config;
+    const fc = C.flow_colors || {};
+    const key = f.id.split("-").join("_"); // "solar-home" -> "solar_home"
+    if (fc[key]) return fc[key];
+    const def = {
+      power: C.flow_power_color || "#21e065",
+      consume: C.flow_consumption_color || "#ffc233",
+      battgrid: C.flow_battery_grid_color || "#7c5cff",
+    };
+    return def[f.kind];
+  }
+
   _bezier(a, b) {
     // (kept for reference) Smooth vertical S-curve between two points.
     const my = (a.y + b.y) / 2;
@@ -521,10 +548,13 @@ class SolarDashboardCard extends HTMLElement {
       .join("");
 
     // Animated moving-dot overlays (one per flow, on top of the tracks).
+    // Each carries its own resolved colour via the --fc custom property.
     const overlayPaths = flows
       .map(
         (f) =>
-          `<path id="flow-${f.id}" class="sdc-flow ${f.kind}" d="${this._line(
+          `<path id="flow-${f.id}" class="sdc-flow ${
+            f.kind
+          }" style="--fc:${this._resolveFlowColor(f)}" d="${this._line(
             f.from,
             f.to
           )}" vector-effect="non-scaling-stroke" />`
@@ -596,6 +626,15 @@ class SolarDashboardCard extends HTMLElement {
           </div>
         </div>`;
 
+    const hg = this._config.home_glow || {};
+    const homeGlow =
+      this._config.home_glow_enabled === false
+        ? ""
+        : `<button class="sdc-home-glow" id="home-glow" title="Home"
+              style="left:${hg.x}%;top:${hg.y}%;width:${hg.w}%;height:${hg.h}%;--hg:${
+            this._config.home_glow_color || "#ffcf6b"
+          }"></button>`;
+
     const title = this._config.title
       ? `<div class="sdc-title">${this._config.title}</div>`
       : "";
@@ -606,11 +645,11 @@ class SolarDashboardCard extends HTMLElement {
         ${title}
         <div class="sdc-stage" id="stage">
           <img class="sdc-bg" id="bg" alt="House" />
+          ${homeGlow}
           <svg class="sdc-flows" viewBox="0 0 100 100" preserveAspectRatio="none">
             ${flowPaths}
           </svg>
           ${node("solar", this._config.solar_label || "Solar")}
-          ${node("home", "Home")}
           ${node("battery", "Battery")}
           ${node("grid", "Grid")}
         </div>
@@ -649,10 +688,10 @@ class SolarDashboardCard extends HTMLElement {
       flows: {},
       vals: {
         solar: $("val-solar"),
-        home: $("val-home"),
         battery: $("val-battery"),
         grid: $("val-grid"),
       },
+      homeGlow: $("home-glow"),
       battIcon: $("icon-battery"),
       stSolar: $("st-solar"),
       stBatt: $("st-batt"),
@@ -683,7 +722,6 @@ class SolarDashboardCard extends HTMLElement {
     // node clicks -> more-info
     const nodeEntity = {
       solar: this._config.solar_generation_sensor,
-      home: this._config.load_power_sensor,
       battery: this._config.battery_soc_sensor,
       grid: this._config.grid_import_sensor,
     };
@@ -692,6 +730,13 @@ class SolarDashboardCard extends HTMLElement {
         this._openMoreInfo(nodeEntity[el.dataset.node])
       );
     });
+
+    // home glow opens more-info for the load entity
+    if (this._els.homeGlow) {
+      this._els.homeGlow.addEventListener("click", () =>
+        this._openMoreInfo(this._config.load_power_sensor)
+      );
+    }
 
     // graphs collapse toggle
     if (this._els.graphsToggle) {
@@ -741,7 +786,6 @@ class SolarDashboardCard extends HTMLElement {
 
     // ---- node values ----
     this._els.vals.solar.textContent = this._fmtPower(solarW);
-    this._els.vals.home.textContent = this._fmtPower(loadW);
     this._els.vals.battery.textContent = this._fmtPercent(soc);
     if (importW !== null && importW > 0) {
       this._els.vals.grid.textContent = "↓ " + this._fmtPower(importW);
@@ -799,9 +843,8 @@ class SolarDashboardCard extends HTMLElement {
     this.shadowRoot
       .querySelector(".sdc-node-grid")
       ?.classList.toggle("active", imp > 0 || exp > 0);
-    this.shadowRoot
-      .querySelector(".sdc-node-home")
-      ?.classList.toggle("active", l > 0);
+    // home is a glow over the house (no node) — lit when consuming
+    this._els.homeGlow?.classList.toggle("active", l > 0);
 
     // ---- stats strip ----
     this._els.stSolar.textContent = this._fmtPower(solarW);
@@ -1469,23 +1512,37 @@ class SolarDashboardCard extends HTMLElement {
         opacity: 0;
         transition: opacity .35s ease;
       }
+      /* colour is per-flow via the --fc custom property set on each path */
       .sdc-flow.active {
         opacity: 1;
+        stroke: var(--fc);
+        filter: drop-shadow(0 0 4px var(--fc));
         animation: sdc-flow-move 1.1s linear infinite;
       }
-      .sdc-flow.power.active {
-        stroke: var(--sdc-flow-power);
-        filter: drop-shadow(0 0 4px var(--sdc-flow-power));
-      }
-      .sdc-flow.consume.active {
-        stroke: var(--sdc-flow-consume);
-        filter: drop-shadow(0 0 4px var(--sdc-flow-consume));
-      }
-      .sdc-flow.battgrid.active {
-        stroke: var(--sdc-flow-battgrid);
-        filter: drop-shadow(0 0 4px var(--sdc-flow-battgrid));
-      }
       @keyframes sdc-flow-move { to { stroke-dashoffset: -13.1; } }
+
+      /* Home glow (replaces the home node) */
+      .sdc-home-glow {
+        position:absolute;
+        transform: translate(-50%, -50%);
+        border:none;
+        padding:0;
+        border-radius:50%;
+        cursor:pointer;
+        background: radial-gradient(ellipse at center, var(--hg) 0%, transparent 68%);
+        filter: blur(10px);
+        mix-blend-mode: screen;
+        opacity: 0;
+        transition: opacity .6s ease;
+      }
+      .sdc-home-glow.active {
+        opacity: 0.6;
+        animation: sdc-glow-pulse 2.6s ease-in-out infinite;
+      }
+      @keyframes sdc-glow-pulse {
+        0%,100% { opacity: 0.38; }
+        50%     { opacity: 0.72; }
+      }
 
       /* Nodes — circular icon + label/value chip */
       .sdc-node {
@@ -1910,6 +1967,19 @@ class SolarDashboardCardEditor extends HTMLElement {
     this._emit();
   }
 
+  _setFlowColor(key, value) {
+    if (!this._config.flow_colors) this._config.flow_colors = {};
+    this._config.flow_colors[key] = value;
+    this._emit();
+  }
+
+  _setHomeGlow(axis, value) {
+    if (!this._config.home_glow) this._config.home_glow = {};
+    const n = parseFloat(value);
+    if (Number.isFinite(n)) this._config.home_glow[axis] = n;
+    this._emit();
+  }
+
   _defaults() {
     return DEFAULTS;
   }
@@ -2038,11 +2108,81 @@ class SolarDashboardCardEditor extends HTMLElement {
 
     const appearance = `
       <div class="sdc-sec">
-        <div class="sdc-sec-h">Flow colours</div>
+        <div class="sdc-sec-h">Flow colours — defaults per kind</div>
         <div class="sdc-grid">
           ${colorInput("flow_power_color", "Power / generation (green)")}
           ${colorInput("flow_consumption_color", "Grid consumption (amber)")}
           ${colorInput("flow_battery_grid_color", "Grid ↔ battery (violet)")}
+        </div>
+      </div>`;
+
+    const flowKindColor = (kind) =>
+      ({
+        power: this._config.flow_power_color || "#21e065",
+        consume: this._config.flow_consumption_color || "#ffc233",
+        battgrid: this._config.flow_battery_grid_color || "#7c5cff",
+      }[kind]);
+
+    const flowColorInput = (key, label, kind) => `
+      <label class="sdc-f sdc-color">
+        <span>${label}</span>
+        <input type="color" data-flowcolor="${key}" value="${
+      (this._config.flow_colors && this._config.flow_colors[key]) ||
+      flowKindColor(kind)
+    }" />
+      </label>`;
+
+    const flowColours = `
+      <div class="sdc-sec">
+        <div class="sdc-sec-h">Flow colours — per direction</div>
+        <div class="sdc-grid">
+          ${flowColorInput("solar_home", "Solar → Home", "power")}
+          ${flowColorInput("solar_battery", "Solar → Battery", "power")}
+          ${flowColorInput("solar_grid", "Solar → Grid", "power")}
+          ${flowColorInput("battery_home", "Battery → Home", "power")}
+          ${flowColorInput("grid_home", "Grid → Home", "consume")}
+          ${flowColorInput("grid_battery", "Grid → Battery", "battgrid")}
+          ${flowColorInput("battery_grid", "Battery → Grid", "battgrid")}
+        </div>
+      </div>`;
+
+    const hg = this._config.home_glow || {};
+    const homeGlowSec = `
+      <div class="sdc-sec">
+        <div class="sdc-sec-h">Home glow (house)</div>
+        <div class="sdc-grid">
+          <label class="sdc-f sdc-check">
+            <input type="checkbox" data-boolexp="home_glow_enabled" ${
+              this._config.home_glow_enabled === false ? "" : "checked"
+            } />
+            <span>Enable home glow</span>
+          </label>
+          <label class="sdc-f sdc-color">
+            <span>Glow colour</span>
+            <input type="color" data-color="home_glow_color" value="${
+              this._config.home_glow_color || d.home_glow_color
+            }" />
+          </label>
+        </div>
+        <div class="sdc-grid">
+          <div class="sdc-node-edit">
+            <span class="sdc-node-name">centre x/y</span>
+            <input type="number" min="0" max="100" data-glow="x" value="${
+              hg.x ?? d.home_glow.x
+            }" title="x %" />
+            <input type="number" min="0" max="100" data-glow="y" value="${
+              hg.y ?? d.home_glow.y
+            }" title="y %" />
+          </div>
+          <div class="sdc-node-edit">
+            <span class="sdc-node-name">size w/h</span>
+            <input type="number" min="0" max="100" data-glow="w" value="${
+              hg.w ?? d.home_glow.w
+            }" title="w %" />
+            <input type="number" min="0" max="100" data-glow="h" value="${
+              hg.h ?? d.home_glow.h
+            }" title="h %" />
+          </div>
         </div>
       </div>`;
 
@@ -2126,6 +2266,8 @@ class SolarDashboardCardEditor extends HTMLElement {
       ${numbers}
       ${costPeriod}
       ${appearance}
+      ${flowColours}
+      ${homeGlowSec}
       ${nodes}
       ${images}
     `;
@@ -2190,6 +2332,16 @@ class SolarDashboardCardEditor extends HTMLElement {
     root.querySelectorAll("select[data-select]").forEach((el) =>
       el.addEventListener("change", (e) =>
         this._set(e.target.dataset.select, e.target.value)
+      )
+    );
+    root.querySelectorAll("input[data-flowcolor]").forEach((el) =>
+      el.addEventListener("change", (e) =>
+        this._setFlowColor(e.target.dataset.flowcolor, e.target.value)
+      )
+    );
+    root.querySelectorAll("input[data-glow]").forEach((el) =>
+      el.addEventListener("change", (e) =>
+        this._setHomeGlow(e.target.dataset.glow, e.target.value)
       )
     );
   }

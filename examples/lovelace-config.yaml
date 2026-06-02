@@ -46,9 +46,28 @@ quarter_days: 91               # legacy fallback only
 # export_energy_quarter_sensor: sensor.grid_export_energy_quarter
 
 # --- Flow colours -----------------------------------------------------------
+# Per-kind defaults:
 flow_power_color: "#21e065"          # green: generation / supply
 flow_consumption_color: "#ffc233"    # amber: grid -> home
-flow_battery_grid_color: "#7c5cff"   # violet: grid -> battery & battery -> grid
+flow_battery_grid_color: "#7c5cff"   # violet: grid <-> battery
+# Per-direction overrides (each falls back to the kind default above):
+flow_colors:
+  solar_home: "#21e065"
+  solar_battery: "#21e065"
+  solar_grid: "#21e065"
+  battery_home: "#38d39f"
+  grid_home: "#ffc233"
+  grid_battery: "#7c5cff"
+  battery_grid: "#b06bff"
+
+# --- Home glow (house) ------------------------------------------------------
+home_glow_enabled: true
+home_glow_color: "#ffcf6b"     # warm glow; lit/pulses when the home is consuming
+home_glow:
+  x: 46    # centre X (% of image)
+  y: 36    # centre Y (%)
+  w: 58    # width (%)
+  h: 52    # height (%)
 
 # --- Behaviour --------------------------------------------------------------
 poll_interval: 10     # seconds
@@ -81,18 +100,18 @@ images:
 # --- Node positions (percentages of the image, 0-100) -----------------------
 # Tune these to line up with YOUR house image.
 nodes:
-  solar:
-    x: 45
-    y: 18
-  home:
-    x: 50
-    y: 58
-  battery:
-    x: 76
-    y: 53
-  grid:
-    x: 90
-    y: 30
+  solar:           # over the roof solar panels
+    x: 36
+    y: 21
+  home:            # invisible anchor — where home-bound flows converge (no bubble)
+    x: 46
+    y: 40
+  battery:         # over the wall battery unit
+    x: 29
+    y: 50
+  grid:            # over the power pole
+    x: 18
+    y: 34
 
 # ---------------------------------------------------------------------------
 # Extended/detail entities (only rendered when details_overlay_boolean is "on")

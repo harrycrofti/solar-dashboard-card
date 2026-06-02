@@ -20,8 +20,8 @@ strip, a battery card and a quarter cost-estimate card.
 | Area | Description |
 |------|-------------|
 | **House image** | Full-width responsive background that switches with `weather.*` state and day/night (driven by your sunrise/sunset sensors). |
-| **Node bubbles** | `SOLAR`, `HOME`, `BATTERY`, `GRID` circular icon nodes positioned by percentage. Active nodes glow/pulse in the flow colour; the battery icon auto-tracks level + charging. Each is clickable and opens the HA more-info dialog for its entity. |
-| **Flow lines** | Clean flat connectors with animated **moving dots**. Active flows stream green (generation/supply) or amber (grid consumption); inactive flows show a dim static track. Colours are configurable. |
+| **Node bubbles** | `SOLAR`, `BATTERY`, `GRID` circular icon nodes positioned by percentage. Active nodes glow/pulse; the battery icon auto-tracks level + charging. Each opens the HA more-info dialog. The **home** is rendered as a coloured glow over the house (clickable for more-info) rather than a node. |
+| **Flow lines** | Clean flat connectors with animated **moving dots**. Every direction has its own configurable colour; active flows stream their colour while inactive flows show a dim static track. |
 | **Stats strip** | Solar generation, battery %, grid import/export, home load. |
 | **Battery card** | Percentage, horizontal bar, charging/discharging/idle status, battery health (SoH). |
 | **Cost card** | Monthly and/or quarterly cost with configurable tariffs and billing dates. Flagged as an estimate unless real kWh energy sensors are configured. |
@@ -249,7 +249,11 @@ to hide the section entirely, or `graphs_collapsed: true` to start it folded.
 | `solar_label` | string | `Solar` | Label for the solar node. |
 | `flow_power_color` | colour | `#21e065` | Colour of the moving flow dots for generation/supply (green). |
 | `flow_consumption_color` | colour | `#ffc233` | Colour of the moving flow dots for grid consumption (amber). |
-| `flow_battery_grid_color` | colour | `#7c5cff` | Colour for grid↔battery flows (charging **from** the grid and exporting **to** the grid). |
+| `flow_battery_grid_color` | colour | `#7c5cff` | Default colour for grid↔battery flows. |
+| `flow_colors` | map | _(per-kind)_ | **Per-direction** colour overrides. Keys: `solar_home`, `solar_battery`, `solar_grid`, `battery_home`, `grid_home`, `grid_battery`, `battery_grid`. Each falls back to the matching kind default above. |
+| `home_glow_enabled` | bool | `true` | Render the home as a glow over the house instead of a node bubble. |
+| `home_glow_color` | colour | `#ffcf6b` | Colour of the house glow (lit when the home is consuming). |
+| `home_glow` | map | `{x:46,y:36,w:58,h:52}` | Glow centre + size as percentages of the image. |
 | `icons` | map | _(mdi defaults)_ | Override node icons: `solar`, `home`, `battery`, `grid` (any `mdi:` icon). Battery icon auto-tracks level/charging. |
 | `show_graphs` | bool | `true` | Show the statistics & graphs section. |
 | `graphs_collapsed` | bool | `false` | Start the graphs section collapsed. |
@@ -296,14 +300,46 @@ right/bottom), so they scale automatically on any screen size.
 
 ```yaml
 nodes:
-  solar:   { x: 45, y: 18 }   # over the roof / solar panels
-  home:    { x: 50, y: 58 }   # over the front door
-  battery: { x: 76, y: 53 }   # over the wall battery
-  grid:    { x: 90, y: 30 }   # over the power pole
+  solar:   { x: 36, y: 21 }   # over the roof / solar panels
+  home:    { x: 46, y: 40 }   # invisible anchor — where home-bound flows converge
+  battery: { x: 29, y: 50 }   # over the wall battery
+  grid:    { x: 18, y: 34 }   # over the power pole
 ```
 
 Tweak `x`/`y` until each bubble sits over the right part of **your** house
-image. The flow lines re-route automatically to match.
+image. The flow lines re-route automatically to match. `home` no longer draws a
+bubble — it's the point the home-bound lines point to, so set it to the middle
+of your house.
+
+### Home glow
+
+The home is shown as a soft coloured glow over the house that brightens/pulses
+when the home is consuming. Position and size it to cover your house:
+
+```yaml
+home_glow_enabled: true
+home_glow_color: "#ffcf6b"        # warm light; pick any colour
+home_glow:
+  x: 46    # centre X (%)
+  y: 36    # centre Y (%)
+  w: 58    # width (%)
+  h: 52    # height (%)
+```
+
+### Per-direction flow colours
+
+Give every flow its own colour (each falls back to the kind default if unset):
+
+```yaml
+flow_colors:
+  solar_home: "#21e065"
+  solar_battery: "#21e065"
+  solar_grid: "#21e065"
+  battery_home: "#38d39f"
+  grid_home: "#ffc233"
+  grid_battery: "#7c5cff"
+  battery_grid: "#b06bff"
+```
 
 ---
 
