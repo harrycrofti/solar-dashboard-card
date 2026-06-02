@@ -20,8 +20,8 @@ strip, a battery card and a quarter cost-estimate card.
 | Area | Description |
 |------|-------------|
 | **House image** | Full-width responsive background that switches with `weather.*` state and day/night (driven by your sunrise/sunset sensors). |
-| **Node bubbles** | `SOLAR`, `HOME`, `BATTERY`, `GRID` floating bubbles positioned by percentage. Each is clickable and opens the HA more-info dialog for its entity. |
-| **Flow lines** | Animated bezier SVG lines between nodes. Active flows pulse in colour; inactive flows stay dim. |
+| **Node bubbles** | `SOLAR`, `HOME`, `BATTERY`, `GRID` circular icon nodes positioned by percentage. Active nodes glow/pulse in the flow colour; the battery icon auto-tracks level + charging. Each is clickable and opens the HA more-info dialog for its entity. |
+| **Flow lines** | Clean flat connectors with animated **moving dots**. Active flows stream green (generation/supply) or amber (grid consumption); inactive flows show a dim static track. Colours are configurable. |
 | **Stats strip** | Solar generation, battery %, grid import/export, home load. |
 | **Battery card** | Percentage, horizontal bar, charging/discharging/idle status, battery health (SoH). |
 | **Cost card** | Quarter cost estimate with configurable tariffs. Clearly flagged as an estimate unless real kWh energy sensors are configured. |
@@ -185,6 +185,9 @@ The cost card switches from **`ESTIMATE`** to **`FROM ENERGY`** and computes
 | `poll_interval` | number | `10` | Refresh interval in seconds. |
 | `use_rest` | bool | `false` | Also poll `/api/states` via `hass.callApi` (usually unnecessary; `hass.states` is preferred). |
 | `solar_label` | string | `Solar` | Label for the solar node. |
+| `flow_power_color` | colour | `#21e065` | Colour of the moving flow dots for generation/supply (green). |
+| `flow_consumption_color` | colour | `#ffc233` | Colour of the moving flow dots for grid consumption (amber). |
+| `icons` | map | _(mdi defaults)_ | Override node icons: `solar`, `home`, `battery`, `grid` (any `mdi:` icon). Battery icon auto-tracks level/charging. |
 | `images` | map | _(see below)_ | Image paths per weather/day-night key. |
 | `nodes` | map | _(see below)_ | Node positions in percentages. |
 | `inverter_temp_sensor`, `ambient_temp_sensor`, `battery_temp_sensor`, `cell_temp_low_sensor`, `cell_temp_high_sensor`, `grid_voltage_sensor`, `grid_current_sensor`, `inverter_fault_sensor`, `inverter_state_sensor`, `work_mode_select`, `pv1..4_power/voltage/current_sensor` | entity | _(GoodWe defaults)_ | Shown in the details overlay. |

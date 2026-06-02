@@ -10,7 +10,7 @@
  * License: MIT
  */
 
-const CARD_VERSION = "1.0.0";
+const CARD_VERSION = "1.1.0";
 
 /* eslint-disable no-console */
 console.info(
@@ -87,6 +87,10 @@ const DEFAULTS = {
   // Behaviour
   poll_interval: 10, // seconds
   use_rest: false, // optional /api/states REST polling
+
+  // Appearance — flow-dot colours (green = generation/supply, amber = grid draw)
+  flow_power_color: "#21e065",
+  flow_consumption_color: "#ffc233",
 
   // Images (all must use /local/, never Windows paths)
   images: {
@@ -426,38 +430,69 @@ class SolarDashboardCard extends HTMLElement {
     this._build();
   }
 
+  _line(a, b) {
+    // Flat straight connector between two percentage points.
+    return `M ${a.x} ${a.y} L ${b.x} ${b.y}`;
+  }
+
   _bezier(a, b) {
-    // Smooth vertical S-curve between two percentage points.
+    // (kept for reference) Smooth vertical S-curve between two points.
     const my = (a.y + b.y) / 2;
     return `M ${a.x} ${a.y} C ${a.x} ${my}, ${b.x} ${my}, ${b.x} ${b.y}`;
   }
 
+  _batteryIcon(soc, charging) {
+    if (soc === null || soc === undefined) return "mdi:battery-unknown";
+    let lvl = Math.round(soc / 10) * 10;
+    if (lvl > 100) lvl = 100;
+    if (lvl < 0) lvl = 0;
+    if (charging) return `mdi:battery-charging-${lvl === 0 ? 10 : lvl}`;
+    if (lvl >= 100) return "mdi:battery";
+    if (lvl <= 0) return "mdi:battery-outline";
+    return `mdi:battery-${lvl}`;
+  }
+
   _build() {
     const n = this._config.nodes;
+    // kind: "power" (green, generation/supply) or "consume" (amber, grid draw)
     const flows = [
-      { id: "solar-home", from: n.solar, to: n.home, cls: "solar" },
-      { id: "solar-battery", from: n.solar, to: n.battery, cls: "battery" },
-      { id: "solar-grid", from: n.solar, to: n.grid, cls: "grid" },
-      { id: "battery-home", from: n.battery, to: n.home, cls: "battery" },
-      { id: "grid-home", from: n.grid, to: n.home, cls: "grid" },
+      { id: "solar-home", from: n.solar, to: n.home, kind: "power" },
+      { id: "solar-battery", from: n.solar, to: n.battery, kind: "power" },
+      { id: "solar-grid", from: n.solar, to: n.grid, kind: "power" },
+      { id: "battery-home", from: n.battery, to: n.home, kind: "power" },
+      { id: "grid-home", from: n.grid, to: n.home, kind: "consume" },
     ];
 
+    // Each connection = a dim static track + an animated moving-dot overlay.
     const flowPaths = flows
-      .map(
-        (f) =>
-          `<path id="flow-${f.id}" class="sdc-flow ${f.cls}" d="${this._bezier(
-            f.from,
-            f.to
-          )}" vector-effect="non-scaling-stroke" />`
-      )
+      .map((f) => {
+        const d = this._line(f.from, f.to);
+        return (
+          `<path class="sdc-track" d="${d}" vector-effect="non-scaling-stroke" />` +
+          `<path id="flow-${f.id}" class="sdc-flow ${f.kind}" d="${d}" vector-effect="non-scaling-stroke" />`
+        );
+      })
       .join("");
+
+    const ic = this._config.icons || {};
+    const icons = {
+      solar: ic.solar || "mdi:solar-power-variant",
+      home: ic.home || "mdi:home-lightning-bolt",
+      battery: ic.battery || "mdi:battery-high",
+      grid: ic.grid || "mdi:transmission-tower",
+    };
 
     const node = (id, label) => `
       <button class="sdc-node sdc-node-${id}" data-node="${id}"
               style="left:${n[id].x}%;top:${n[id].y}%"
               title="${label}">
-        <span class="sdc-node-label">${label}</span>
-        <span class="sdc-node-value" id="val-${id}">—</span>
+        <span class="sdc-node-ring">
+          <ha-icon id="icon-${id}" icon="${icons[id]}"></ha-icon>
+        </span>
+        <span class="sdc-node-meta">
+          <span class="sdc-node-label">${label}</span>
+          <span class="sdc-node-value" id="val-${id}">—</span>
+        </span>
       </button>`;
 
     const title = this._config.title
@@ -522,6 +557,7 @@ class SolarDashboardCard extends HTMLElement {
         battery: $("val-battery"),
         grid: $("val-grid"),
       },
+      battIcon: $("icon-battery"),
       stSolar: $("st-solar"),
       stBatt: $("st-batt"),
       stGrid: $("st-grid"),
@@ -600,6 +636,14 @@ class SolarDashboardCard extends HTMLElement {
     const gridToHome = (importW || 0) > 0;
     const solarToGrid = (exportW || 0) > 0;
     const solarToHome = (solarW || 0) > 0 && (loadW || 0) > 0;
+
+    // battery node icon reflects level + charging
+    if (this._els.battIcon) {
+      this._els.battIcon.setAttribute(
+        "icon",
+        this._batteryIcon(soc, solarToBattery)
+      );
+    }
 
     this._setFlow("solar-home", solarToHome);
     this._setFlow("solar-battery", solarToBattery);
@@ -753,12 +797,16 @@ class SolarDashboardCard extends HTMLElement {
   /* ---- styles ---- */
 
   _styles() {
+    const powerColor = this._config.flow_power_color || "#21e065";
+    const consumeColor = this._config.flow_consumption_color || "#ffc233";
     return `
       :host { display:block; }
       ha-card {
         --sdc-bg: var(--card-background-color, #11151c);
         --sdc-fg: var(--primary-text-color, #e1e1e1);
         --sdc-muted: var(--secondary-text-color, #9aa0a6);
+        --sdc-flow-power: ${powerColor};
+        --sdc-flow-consume: ${consumeColor};
         --sdc-solar: #f5c542;
         --sdc-grid: #ff5d5d;
         --sdc-battery: #38d39f;
@@ -796,63 +844,109 @@ class SolarDashboardCard extends HTMLElement {
         pointer-events:none;
         overflow:visible;
       }
+      /* dim static track under every connection */
+      .sdc-track {
+        fill:none;
+        stroke: rgba(255,255,255,0.12);
+        stroke-width: 2;
+        stroke-linecap: round;
+      }
+      /* animated moving-dot overlay (only visible when active) */
       .sdc-flow {
         fill:none;
-        stroke: var(--sdc-muted);
-        stroke-width: 2;
-        opacity: 0.22;
+        stroke: transparent;
+        stroke-width: 4;
         stroke-linecap: round;
-        transition: opacity .4s ease;
+        stroke-dasharray: 0.1 13;
+        opacity: 0;
+        transition: opacity .35s ease;
       }
-      .sdc-flow.solar.active { stroke: var(--sdc-solar); }
-      .sdc-flow.grid.active  { stroke: var(--sdc-grid); }
-      .sdc-flow.battery.active { stroke: var(--sdc-battery); }
       .sdc-flow.active {
         opacity: 1;
-        stroke-width: 3;
-        stroke-dasharray: 6 6;
-        animation: sdc-dash 0.9s linear infinite;
-        filter: drop-shadow(0 0 3px currentColor);
+        animation: sdc-flow-move 1.1s linear infinite;
       }
-      @keyframes sdc-dash { to { stroke-dashoffset: -12; } }
+      .sdc-flow.power.active {
+        stroke: var(--sdc-flow-power);
+        filter: drop-shadow(0 0 4px var(--sdc-flow-power));
+      }
+      .sdc-flow.consume.active {
+        stroke: var(--sdc-flow-consume);
+        filter: drop-shadow(0 0 4px var(--sdc-flow-consume));
+      }
+      @keyframes sdc-flow-move { to { stroke-dashoffset: -13.1; } }
 
-      /* Nodes */
+      /* Nodes — circular icon + label/value chip */
       .sdc-node {
         position:absolute;
         transform: translate(-50%, -50%);
         display:flex;
         flex-direction:column;
         align-items:center;
-        gap:2px;
-        padding:6px 10px;
-        min-width:64px;
+        gap:5px;
+        padding:0;
         border:none;
-        border-radius:14px;
-        background: rgba(10,14,20,0.72);
-        backdrop-filter: blur(4px);
+        background:none;
         color: var(--sdc-fg);
         font-family: inherit;
         cursor:pointer;
-        box-shadow: 0 2px 8px rgba(0,0,0,0.45);
-        border:1px solid rgba(255,255,255,0.08);
-        transition: transform .15s ease, box-shadow .2s ease, border-color .2s ease;
-        line-height:1.1;
+        transition: transform .15s ease;
       }
-      .sdc-node:hover { transform: translate(-50%, -50%) scale(1.06); }
-      .sdc-node.active { border-color: currentColor; }
-      .sdc-node-solar.active   { color: var(--sdc-solar); }
-      .sdc-node-grid.active    { color: var(--sdc-grid); }
-      .sdc-node-battery.active { color: var(--sdc-battery); }
-      .sdc-node-home.active    { color: var(--sdc-home); }
+      .sdc-node:hover { transform: translate(-50%, -50%) scale(1.07); }
+      .sdc-node-ring {
+        width:52px;
+        height:52px;
+        border-radius:50%;
+        display:flex;
+        align-items:center;
+        justify-content:center;
+        color: var(--sdc-muted);
+        background: radial-gradient(circle at 32% 28%, rgba(255,255,255,0.12), rgba(10,14,20,0.82));
+        border:2px solid rgba(255,255,255,0.16);
+        box-shadow: 0 4px 14px rgba(0,0,0,0.45), inset 0 0 10px rgba(0,0,0,0.45);
+        backdrop-filter: blur(6px);
+        transition: color .25s ease, border-color .25s ease, box-shadow .25s ease;
+      }
+      .sdc-node-ring ha-icon {
+        --mdc-icon-size: 26px;
+        width:26px;
+        height:26px;
+      }
+      .sdc-node-meta {
+        display:flex;
+        flex-direction:column;
+        align-items:center;
+        gap:1px;
+        padding:2px 9px;
+        border-radius:10px;
+        background: rgba(10,14,20,0.72);
+        backdrop-filter: blur(4px);
+        line-height:1.15;
+      }
       .sdc-node-label {
-        font-size:0.62rem;
-        letter-spacing:0.06em;
+        font-size:0.56rem;
+        letter-spacing:0.09em;
         text-transform:uppercase;
         color: var(--sdc-muted);
-        font-weight:600;
+        font-weight:700;
       }
-      .sdc-node.active .sdc-node-label { color: currentColor; }
-      .sdc-node-value { font-size:0.86rem; font-weight:700; color: var(--sdc-fg); }
+      .sdc-node-value { font-size:0.82rem; font-weight:700; color: var(--sdc-fg); }
+
+      /* per-node accent colour (ties into the flow palette) */
+      .sdc-node-solar   { --nc: var(--sdc-flow-power); }
+      .sdc-node-battery { --nc: var(--sdc-flow-power); }
+      .sdc-node-home    { --nc: var(--sdc-flow-consume); }
+      .sdc-node-grid    { --nc: var(--sdc-flow-consume); }
+
+      .sdc-node.active .sdc-node-ring {
+        color: var(--nc);
+        border-color: var(--nc);
+        animation: sdc-pulse 1.9s ease-in-out infinite;
+      }
+      .sdc-node.active .sdc-node-label { color: var(--nc); }
+      @keyframes sdc-pulse {
+        0%,100% { box-shadow: 0 0 0 3px rgba(255,255,255,0.03), 0 0 10px var(--nc); }
+        50%     { box-shadow: 0 0 0 6px rgba(255,255,255,0.06), 0 0 22px var(--nc); }
+      }
 
       /* Stats strip */
       .sdc-stats {
@@ -966,9 +1060,11 @@ class SolarDashboardCard extends HTMLElement {
 
       /* Responsive */
       @media (max-width: 600px) {
-        .sdc-node { min-width:52px; padding:4px 7px; }
-        .sdc-node-value { font-size:0.74rem; }
-        .sdc-node-label { font-size:0.55rem; }
+        .sdc-node-ring { width:42px; height:42px; }
+        .sdc-node-ring ha-icon { --mdc-icon-size:21px; width:21px; height:21px; }
+        .sdc-node-meta { padding:1px 7px; }
+        .sdc-node-value { font-size:0.72rem; }
+        .sdc-node-label { font-size:0.5rem; }
         .sdc-cards { grid-template-columns: 1fr; }
         .sdc-d-grid { grid-template-columns: 1fr; }
         .sdc-stat-v { font-size:0.86rem; }
@@ -1172,6 +1268,23 @@ class SolarDashboardCardEditor extends HTMLElement {
         </div>
       </div>`;
 
+    const colorInput = (key, label) => `
+      <label class="sdc-f sdc-color">
+        <span>${label}</span>
+        <input type="color" data-color="${key}" value="${
+      this._config[key] || d[key]
+    }" />
+      </label>`;
+
+    const appearance = `
+      <div class="sdc-sec">
+        <div class="sdc-sec-h">Flow colours</div>
+        <div class="sdc-grid">
+          ${colorInput("flow_power_color", "Power / generation (green)")}
+          ${colorInput("flow_consumption_color", "Grid consumption (amber)")}
+        </div>
+      </div>`;
+
     const nodes = `
       <div class="sdc-sec">
         <div class="sdc-sec-h">Node positions (% of image)</div>
@@ -1229,6 +1342,11 @@ class SolarDashboardCardEditor extends HTMLElement {
           box-sizing:border-box;
         }
         .sdc-f.sdc-check { flex-direction:row; align-items:center; gap:8px; }
+        .sdc-f.sdc-color input[type=color] {
+          width:100%; height:34px; padding:2px; border-radius:6px;
+          background: var(--secondary-background-color, #1c1f26);
+          border:1px solid var(--divider-color, rgba(255,255,255,0.12)); cursor:pointer;
+        }
         .sdc-node-edit {
           display:grid; grid-template-columns: 1fr 64px 64px; gap:6px; align-items:center;
         }
@@ -1245,6 +1363,7 @@ class SolarDashboardCardEditor extends HTMLElement {
       <div class="sdc-note">Leave a field blank to use its built-in default (shown as placeholder).</div>
       ${sections}
       ${numbers}
+      ${appearance}
       ${nodes}
       ${images}
     `;
@@ -1292,6 +1411,11 @@ class SolarDashboardCardEditor extends HTMLElement {
     root.querySelectorAll("input[data-image]").forEach((el) =>
       el.addEventListener("change", (e) =>
         this._setImage(e.target.dataset.image, e.target.value.trim())
+      )
+    );
+    root.querySelectorAll("input[data-color]").forEach((el) =>
+      el.addEventListener("change", (e) =>
+        this._set(e.target.dataset.color, e.target.value)
       )
     );
   }
