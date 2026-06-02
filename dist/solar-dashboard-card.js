@@ -10,7 +10,7 @@
  * License: MIT
  */
 
-const CARD_VERSION = "1.4.0";
+const CARD_VERSION = "1.5.0";
 
 /* eslint-disable no-console */
 console.info(
@@ -109,7 +109,12 @@ const DEFAULTS = {
   // Home is rendered as a glow over the house (no node bubble).
   home_glow_enabled: true,
   home_glow_color: "#ffcf6b", // warm glow when the home is consuming
-  home_glow: { x: 46, y: 36, w: 58, h: 52 }, // centre + size, % of the image
+  home_glow_blur: 14, // glow softness/size in px (used by both glow modes)
+  home_glow: { x: 46, y: 36, w: 58, h: 52 }, // radial-glow centre + size (% of image)
+  // Optional transparent PNG of JUST the house, authored at the same canvas /
+  // registration as the weather images. When set, the glow is applied as a
+  // drop-shadow on its alpha channel, so it hugs the house silhouette exactly.
+  house_overlay_image: undefined,
 
   // Statistics & graphs (today, from local midnight)
   show_graphs: true,
@@ -627,13 +632,19 @@ class SolarDashboardCard extends HTMLElement {
         </div>`;
 
     const hg = this._config.home_glow || {};
-    const homeGlow =
-      this._config.home_glow_enabled === false
-        ? ""
-        : `<button class="sdc-home-glow" id="home-glow" title="Home"
-              style="left:${hg.x}%;top:${hg.y}%;width:${hg.w}%;height:${hg.h}%;--hg:${
-            this._config.home_glow_color || "#ffcf6b"
-          }"></button>`;
+    const hgColor = this._config.home_glow_color || "#ffcf6b";
+    const hgBlur = (this._config.home_glow_blur ?? 14) + "px";
+    let homeGlow = "";
+    if (this._config.house_overlay_image) {
+      // Alpha-masked overlay: glow traces the house silhouette via drop-shadow.
+      homeGlow = `<img class="sdc-house-overlay" id="home-overlay" alt="Home" loading="lazy"
+              src="${this._config.house_overlay_image}"
+              style="--hg:${hgColor};--hg-blur:${hgBlur}" />`;
+    } else if (this._config.home_glow_enabled !== false) {
+      // Fallback: soft radial glow box positioned over the house.
+      homeGlow = `<button class="sdc-home-glow" id="home-glow" title="Home"
+              style="left:${hg.x}%;top:${hg.y}%;width:${hg.w}%;height:${hg.h}%;--hg:${hgColor};--hg-blur:${hgBlur}"></button>`;
+    }
 
     const title = this._config.title
       ? `<div class="sdc-title">${this._config.title}</div>`
@@ -692,6 +703,7 @@ class SolarDashboardCard extends HTMLElement {
         grid: $("val-grid"),
       },
       homeGlow: $("home-glow"),
+      homeOverlay: $("home-overlay"),
       battIcon: $("icon-battery"),
       stSolar: $("st-solar"),
       stBatt: $("st-batt"),
@@ -731,12 +743,13 @@ class SolarDashboardCard extends HTMLElement {
       );
     });
 
-    // home glow opens more-info for the load entity
-    if (this._els.homeGlow) {
-      this._els.homeGlow.addEventListener("click", () =>
-        this._openMoreInfo(this._config.load_power_sensor)
-      );
-    }
+    // home glow / overlay opens more-info for the load entity
+    [this._els.homeGlow, this._els.homeOverlay].forEach((el) => {
+      if (el)
+        el.addEventListener("click", () =>
+          this._openMoreInfo(this._config.load_power_sensor)
+        );
+    });
 
     // graphs collapse toggle
     if (this._els.graphsToggle) {
@@ -844,7 +857,9 @@ class SolarDashboardCard extends HTMLElement {
       .querySelector(".sdc-node-grid")
       ?.classList.toggle("active", imp > 0 || exp > 0);
     // home is a glow over the house (no node) — lit when consuming
-    this._els.homeGlow?.classList.toggle("active", l > 0);
+    const homeLit = this._config.home_glow_enabled !== false && l > 0;
+    this._els.homeGlow?.classList.toggle("active", homeLit);
+    this._els.homeOverlay?.classList.toggle("active", homeLit);
 
     // ---- stats strip ----
     this._els.stSolar.textContent = this._fmtPower(solarW);
@@ -1521,7 +1536,7 @@ class SolarDashboardCard extends HTMLElement {
       }
       @keyframes sdc-flow-move { to { stroke-dashoffset: -13.1; } }
 
-      /* Home glow (replaces the home node) */
+      /* Home glow (replaces the home node) — radial-box fallback mode */
       .sdc-home-glow {
         position:absolute;
         transform: translate(-50%, -50%);
@@ -1530,7 +1545,7 @@ class SolarDashboardCard extends HTMLElement {
         border-radius:50%;
         cursor:pointer;
         background: radial-gradient(ellipse at center, var(--hg) 0%, transparent 68%);
-        filter: blur(10px);
+        filter: blur(var(--hg-blur, 14px));
         mix-blend-mode: screen;
         opacity: 0;
         transition: opacity .6s ease;
@@ -1542,6 +1557,27 @@ class SolarDashboardCard extends HTMLElement {
       @keyframes sdc-glow-pulse {
         0%,100% { opacity: 0.38; }
         50%     { opacity: 0.72; }
+      }
+
+      /* Alpha-masked house overlay — glow follows the house silhouette */
+      .sdc-house-overlay {
+        position:absolute;
+        inset:0;
+        width:100%;
+        height:100%;
+        object-fit: fill;
+        pointer-events:auto;
+        cursor:pointer;
+        filter: drop-shadow(0 0 0 transparent);
+        transition: filter .6s ease;
+      }
+      .sdc-house-overlay.active {
+        animation: sdc-overlay-glow 2.6s ease-in-out infinite;
+      }
+      @keyframes sdc-overlay-glow {
+        0%,100% { filter: drop-shadow(0 0 calc(var(--hg-blur, 14px) * 0.55) var(--hg)); }
+        50%     { filter: drop-shadow(0 0 var(--hg-blur, 14px) var(--hg))
+                          drop-shadow(0 0 calc(var(--hg-blur, 14px) * 1.9) var(--hg)); }
       }
 
       /* Nodes — circular icon + label/value chip */
@@ -2162,6 +2198,18 @@ class SolarDashboardCardEditor extends HTMLElement {
             <input type="color" data-color="home_glow_color" value="${
               this._config.home_glow_color || d.home_glow_color
             }" />
+          </label>
+          <label class="sdc-f">
+            <span>House overlay image (/local/…)</span>
+            <input type="text" data-text="house_overlay_image" value="${
+              this._config.house_overlay_image ?? ""
+            }" placeholder="(optional alpha-masked PNG)" />
+          </label>
+          <label class="sdc-f">
+            <span>Glow size / blur (px)</span>
+            <input type="number" data-number="home_glow_blur" value="${
+              this._config.home_glow_blur ?? ""
+            }" placeholder="${d.home_glow_blur}" />
           </label>
         </div>
         <div class="sdc-grid">

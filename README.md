@@ -253,7 +253,9 @@ to hide the section entirely, or `graphs_collapsed: true` to start it folded.
 | `flow_colors` | map | _(per-kind)_ | **Per-direction** colour overrides. Keys: `solar_home`, `solar_battery`, `solar_grid`, `battery_home`, `grid_home`, `grid_battery`, `battery_grid`. Each falls back to the matching kind default above. |
 | `home_glow_enabled` | bool | `true` | Render the home as a glow over the house instead of a node bubble. |
 | `home_glow_color` | colour | `#ffcf6b` | Colour of the house glow (lit when the home is consuming). |
-| `home_glow` | map | `{x:46,y:36,w:58,h:52}` | Glow centre + size as percentages of the image. |
+| `home_glow_blur` | number | `14` | Glow softness/size in px (both glow modes). |
+| `home_glow` | map | `{x:46,y:36,w:58,h:52}` | Radial-glow centre + size as percentages (fallback mode only). |
+| `house_overlay_image` | path | _(none)_ | Optional transparent PNG of **just the house**. When set, the glow is a `drop-shadow` on its alpha so it hugs the house silhouette exactly (replaces the radial box). |
 | `icons` | map | _(mdi defaults)_ | Override node icons: `solar`, `home`, `battery`, `grid` (any `mdi:` icon). Battery icon auto-tracks level/charging. |
 | `show_graphs` | bool | `true` | Show the statistics & graphs section. |
 | `graphs_collapsed` | bool | `false` | Start the graphs section collapsed. |
@@ -314,17 +316,45 @@ of your house.
 ### Home glow
 
 The home is shown as a soft coloured glow over the house that brightens/pulses
-when the home is consuming. Position and size it to cover your house:
+when the home is consuming. There are two modes:
+
+**A. Radial-box glow (default, zero extra assets).** A soft elliptical glow you
+position and size over the house:
 
 ```yaml
 home_glow_enabled: true
 home_glow_color: "#ffcf6b"        # warm light; pick any colour
+home_glow_blur: 14                # px
 home_glow:
   x: 46    # centre X (%)
   y: 36    # centre Y (%)
   w: 58    # width (%)
   h: 52    # height (%)
 ```
+
+**B. Alpha-masked house overlay (precise — glow hugs the house outline).**
+Provide a transparent PNG of **just the house** and the glow becomes a
+`drop-shadow` on its alpha channel, so it traces the exact silhouette:
+
+```yaml
+home_glow_color: "#ffcf6b"
+home_glow_blur: 16
+house_overlay_image: /local/HouseOverlay.png
+```
+
+**Authoring the overlay PNG:**
+
+1. Start from one of your weather images (e.g. `Sunny.png`) so the canvas size
+   and the house position match exactly.
+2. Erase **everything except the house** (sky, yard, fence, pole, tree, etc.)
+   leaving those areas fully transparent. Keep the house pixels where they are —
+   do not move or resize them.
+3. Export as PNG **at the same dimensions** and save to `<config>/www/`
+   (e.g. `/local/HouseOverlay.png`).
+
+The overlay sits exactly on top of the matching house in every weather image, so
+it's invisible until it glows. When `house_overlay_image` is set it takes over
+from the radial box; `home_glow_color`/`home_glow_blur` still apply.
 
 ### Per-direction flow colours
 

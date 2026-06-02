@@ -63,11 +63,16 @@ flow_colors:
 # --- Home glow (house) ------------------------------------------------------
 home_glow_enabled: true
 home_glow_color: "#ffcf6b"     # warm glow; lit/pulses when the home is consuming
+home_glow_blur: 14             # px
+# Mode A (default): radial-box glow positioned over the house
 home_glow:
   x: 46    # centre X (% of image)
   y: 36    # centre Y (%)
   w: 58    # width (%)
   h: 52    # height (%)
+# Mode B (precise): transparent PNG of just the house — glow hugs its outline.
+# When set, this replaces the radial box above. See README for how to make it.
+# house_overlay_image: /local/HouseOverlay.png
 
 # --- Behaviour --------------------------------------------------------------
 poll_interval: 10     # seconds
