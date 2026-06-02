@@ -55,6 +55,18 @@ poll_interval: 10     # seconds
 use_rest: false       # set true to also poll /api/states (usually unnecessary)
 solar_label: Solar
 
+# --- Statistics & graphs (today, from local midnight) -----------------------
+show_graphs: true
+graphs_collapsed: false
+graph_poll_interval: 300   # seconds between history refreshes
+# Optional kWh-today sensors override the integrated estimates for accuracy:
+# pv_energy_today_sensor: sensor.goodwe_pv_energy_today
+# load_energy_today_sensor: sensor.goodwe_house_consumption_today
+# import_energy_today_sensor: sensor.grid_import_energy_today
+# export_energy_today_sensor: sensor.grid_export_energy_today
+# battery_charge_energy_today_sensor: sensor.battery_charge_energy_today
+# battery_discharge_energy_today_sensor: sensor.battery_discharge_energy_today
+
 # --- Images (weather + day/night) -------------------------------------------
 images:
   default: /local/Sunny.png

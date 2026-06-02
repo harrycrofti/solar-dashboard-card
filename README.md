@@ -24,7 +24,8 @@ strip, a battery card and a quarter cost-estimate card.
 | **Flow lines** | Clean flat connectors with animated **moving dots**. Active flows stream green (generation/supply) or amber (grid consumption); inactive flows show a dim static track. Colours are configurable. |
 | **Stats strip** | Solar generation, battery %, grid import/export, home load. |
 | **Battery card** | Percentage, horizontal bar, charging/discharging/idle status, battery health (SoH). |
-| **Cost card** | Quarter cost estimate with configurable tariffs. Clearly flagged as an estimate unless real kWh energy sensors are configured. |
+| **Cost card** | Monthly and/or quarterly cost with configurable tariffs and billing dates. Flagged as an estimate unless real kWh energy sensors are configured. |
+| **Statistics & graphs** | Collapsible section (GoodWe SEMS+/Sigenergy style): daily energy summary (kWh generated/used/imported/exported/charged/discharged), energy-dispersion donuts, power-over-the-day and battery-SoC-over-the-day charts — all from local midnight. |
 | **Details overlay** | Optional extended grid (PV strings, temps, voltages, work mode, faults) toggled by an `input_boolean`. |
 
 ---
@@ -176,6 +177,45 @@ computes `import_kWh × import_tariff − export_kWh × export_tariff`.
 
 ---
 
+## Statistics & graphs
+
+A collapsible **Statistics & Graphs** section (inspired by the GoodWe SEMS+ and
+Sigenergy apps) sits below the main card and shows **today's data from local
+midnight**:
+
+- **Stat tiles** — generated, used, self-sufficiency %, self-consumption %.
+- **Daily energy summary** — horizontal bars for kWh generated, used, imported
+  (bought), exported (sold), charged (stored) and discharged.
+- **Energy dispersion** — two donuts: *Home supply* (solar / battery / grid) and
+  *Solar usage* (home / battery / grid).
+- **Power today** — a line chart of solar, load, import, export, charge and
+  discharge across the day.
+- **Battery charge today** — an area chart of battery SoC across the day.
+
+**How the data is sourced.** The card fetches today's history from Home
+Assistant (websocket `history/history_during_period`) and **integrates the live
+power sensors into kWh on the fly**, so the graphs work even if you have no
+dedicated energy sensors. The charts render as lightweight inline SVG — no
+charting library or extra card is required.
+
+**For metered accuracy**, configure any of the optional kWh-today sensors and
+they override the integrated estimates:
+
+```yaml
+pv_energy_today_sensor: sensor.goodwe_pv_energy_today
+load_energy_today_sensor: sensor.goodwe_house_consumption_today
+import_energy_today_sensor: sensor.grid_import_energy_today
+export_energy_today_sensor: sensor.grid_export_energy_today
+battery_charge_energy_today_sensor: sensor.battery_charge_energy_today
+battery_discharge_energy_today_sensor: sensor.battery_discharge_energy_today
+```
+
+History is refreshed every `graph_poll_interval` seconds (default 300) and only
+while the section is expanded, to keep the load light. Set `show_graphs: false`
+to hide the section entirely, or `graphs_collapsed: true` to start it folded.
+
+---
+
 ## Configuration options
 
 | Option | Type | Default | Description |
@@ -211,6 +251,10 @@ computes `import_kWh × import_tariff − export_kWh × export_tariff`.
 | `flow_consumption_color` | colour | `#ffc233` | Colour of the moving flow dots for grid consumption (amber). |
 | `flow_battery_grid_color` | colour | `#7c5cff` | Colour for grid↔battery flows (charging **from** the grid and exporting **to** the grid). |
 | `icons` | map | _(mdi defaults)_ | Override node icons: `solar`, `home`, `battery`, `grid` (any `mdi:` icon). Battery icon auto-tracks level/charging. |
+| `show_graphs` | bool | `true` | Show the statistics & graphs section. |
+| `graphs_collapsed` | bool | `false` | Start the graphs section collapsed. |
+| `graph_poll_interval` | number | `300` | Seconds between history refreshes for the graphs. |
+| `pv_energy_today_sensor` … `battery_discharge_energy_today_sensor` | entity | _(none)_ | Optional kWh-today sensors that **override** the integrated estimates (`pv_/load_/import_/export_/battery_charge_/battery_discharge_energy_today_sensor`). |
 | `images` | map | _(see below)_ | Image paths per weather/day-night key. |
 | `nodes` | map | _(see below)_ | Node positions in percentages. |
 | `inverter_temp_sensor`, `ambient_temp_sensor`, `battery_temp_sensor`, `cell_temp_low_sensor`, `cell_temp_high_sensor`, `grid_voltage_sensor`, `grid_current_sensor`, `inverter_fault_sensor`, `inverter_state_sensor`, `work_mode_select`, `pv1..4_power/voltage/current_sensor` | entity | _(GoodWe defaults)_ | Shown in the details overlay. |

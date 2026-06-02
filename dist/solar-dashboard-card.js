@@ -10,7 +10,7 @@
  * License: MIT
  */
 
-const CARD_VERSION = "1.2.0";
+const CARD_VERSION = "1.3.0";
 
 /* eslint-disable no-console */
 console.info(
@@ -102,6 +102,18 @@ const DEFAULTS = {
   flow_consumption_color: "#ffc233", // amber: grid draw to home
   flow_battery_grid_color: "#7c5cff", // violet: grid<->battery (charge from / export to grid)
 
+  // Statistics & graphs (today, from local midnight)
+  show_graphs: true,
+  graphs_collapsed: false,
+  graph_poll_interval: 300, // seconds between history refreshes
+  // Optional daily kWh-today sensors (override the integrated estimates)
+  pv_energy_today_sensor: undefined,
+  load_energy_today_sensor: undefined,
+  import_energy_today_sensor: undefined,
+  export_energy_today_sensor: undefined,
+  battery_charge_energy_today_sensor: undefined,
+  battery_discharge_energy_today_sensor: undefined,
+
   // Images (all must use /local/, never Windows paths)
   images: {
     default: "/local/Sunny.png",
@@ -121,6 +133,20 @@ const DEFAULTS = {
     battery: { x: 76, y: 53 },
     grid: { x: 90, y: 30 },
   },
+};
+
+/* ------------------------------------------------------------------ *
+ * Graph palette
+ * ------------------------------------------------------------------ */
+
+const GRAPH_PALETTE = {
+  pv: "#f5c542", // generated / solar (yellow)
+  load: "#5aa9ff", // used / load (blue)
+  imp: "#ff5d5d", // imported / bought (red)
+  exp: "#21e065", // exported / sold (green)
+  chg: "#7c5cff", // charged / stored (violet)
+  dis: "#38d39f", // discharged (teal)
+  soc: "#21e065", // battery state of charge
 };
 
 /* ------------------------------------------------------------------ *
@@ -167,6 +193,7 @@ class SolarDashboardCard extends HTMLElement {
     this._hass = hass;
     this._maybeBuild();
     this._update();
+    this._maybeFetchGraphs();
   }
 
   get hass() {
@@ -227,6 +254,7 @@ class SolarDashboardCard extends HTMLElement {
       }
     }
     this._update();
+    this._maybeFetchGraphs();
   }
 
   /* ---- entity resolution / aliases ---- */
@@ -550,6 +578,24 @@ class SolarDashboardCard extends HTMLElement {
       )
       .join("");
 
+    this._graphsCollapsed = !!this._config.graphs_collapsed;
+    const graphsBlock =
+      this._config.show_graphs === false
+        ? ""
+        : `
+        <div class="sdc-graphs-wrap ${
+          this._graphsCollapsed ? "collapsed" : ""
+        }" id="graphs-wrap">
+          <button class="sdc-graphs-toggle" id="graphs-toggle">
+            <ha-icon icon="mdi:chart-areaspline"></ha-icon>
+            <span>Statistics &amp; Graphs</span>
+            <ha-icon class="sdc-chevron" icon="mdi:chevron-down"></ha-icon>
+          </button>
+          <div class="sdc-graphs" id="graphs">
+            <div class="sdc-g-empty">Loading today's data…</div>
+          </div>
+        </div>`;
+
     const title = this._config.title
       ? `<div class="sdc-title">${this._config.title}</div>`
       : "";
@@ -591,6 +637,8 @@ class SolarDashboardCard extends HTMLElement {
         </div>
 
         <div class="sdc-details" id="details" hidden></div>
+
+        ${graphsBlock}
       </ha-card>
     `;
 
@@ -615,6 +663,9 @@ class SolarDashboardCard extends HTMLElement {
       battBar: $("batt-bar"),
       battHealth: $("batt-health"),
       details: $("details"),
+      graphsWrap: $("graphs-wrap"),
+      graphsToggle: $("graphs-toggle"),
+      graphsEl: $("graphs"),
     };
     flows.forEach((f) => {
       this._els.flows[f.id] = $(`flow-${f.id}`);
@@ -642,7 +693,23 @@ class SolarDashboardCard extends HTMLElement {
       );
     });
 
+    // graphs collapse toggle
+    if (this._els.graphsToggle) {
+      this._els.graphsToggle.addEventListener("click", () => {
+        this._graphsCollapsed = !this._graphsCollapsed;
+        this._els.graphsWrap.classList.toggle(
+          "collapsed",
+          this._graphsCollapsed
+        );
+        if (!this._graphsCollapsed) {
+          if (this._graphData) this._drawGraphs();
+          this._maybeFetchGraphs();
+        }
+      });
+    }
+
     this._built = true;
+    this._maybeFetchGraphs();
   }
 
   /* ---- live update ---- */
@@ -922,6 +989,417 @@ class SolarDashboardCard extends HTMLElement {
     });
   }
 
+  /* ---- graphs: fetch + compute + draw ---- */
+
+  _maybeFetchGraphs() {
+    if (this._config.show_graphs === false) return;
+    if (!this._hass || !this._hass.callWS) return;
+    if (this._graphsCollapsed) return; // only fetch while visible
+    const dayKey = new Date().toDateString();
+    const interval = (Number(this._config.graph_poll_interval) || 300) * 1000;
+    const stale =
+      !this._lastGraphFetch ||
+      Date.now() - this._lastGraphFetch > interval ||
+      this._graphDay !== dayKey;
+    if (stale && !this._graphFetching) this._fetchGraphs();
+  }
+
+  async _fetchGraphs() {
+    this._graphFetching = true;
+    try {
+      const C = this._config;
+      const now = new Date();
+      const start = new Date(
+        now.getFullYear(),
+        now.getMonth(),
+        now.getDate(),
+        0,
+        0,
+        0,
+        0
+      );
+      const map = {
+        solar: C.solar_generation_sensor,
+        load: C.load_power_sensor,
+        charge: C.battery_charge_sensor,
+        discharge: C.battery_discharge_sensor,
+        import: C.grid_import_sensor,
+        export: C.grid_export_sensor,
+        soc: C.battery_soc_sensor,
+      };
+      const ids = [...new Set(Object.values(map).filter(Boolean))];
+      const res = await this._hass.callWS({
+        type: "history/history_during_period",
+        start_time: start.toISOString(),
+        end_time: now.toISOString(),
+        entity_ids: ids,
+        minimal_response: false,
+        no_attributes: true,
+      });
+      const series = {};
+      for (const key in map) {
+        series[key] = this._series(res, map[key], now.getTime());
+      }
+      this._graphData = this._computeGraphs(series, start.getTime(), now.getTime());
+      this._lastGraphFetch = Date.now();
+      this._graphDay = now.toDateString();
+      this._drawGraphs();
+    } catch (e) {
+      if (this._els.graphsEl && !this._graphData) {
+        this._els.graphsEl.innerHTML =
+          '<div class="sdc-g-empty">History unavailable for this period.</div>';
+      }
+    } finally {
+      this._graphFetching = false;
+    }
+  }
+
+  /** Normalise a history response series to [{t(ms), v(number)}], power→W. */
+  _series(res, entity, endMs) {
+    if (!entity || !res || !res[entity]) return [];
+    const unit = String(
+      (this._stateObj(entity)?.attributes || {}).unit_of_measurement || ""
+    ).toLowerCase();
+    let scale = 1;
+    if (unit.includes("kw") && !unit.includes("kwh")) scale = 1000;
+    else if (unit.includes("mw")) scale = 1000000;
+    const pts = [];
+    for (const p of res[entity]) {
+      const raw = p.s !== undefined ? p.s : p.state;
+      if (raw === null || raw === undefined || this._isUnavailable(raw))
+        continue;
+      const v = parseFloat(raw);
+      if (!Number.isFinite(v)) continue;
+      const t =
+        p.lu !== undefined
+          ? p.lu * 1000
+          : Date.parse(p.last_changed || p.last_updated);
+      if (!Number.isFinite(t)) continue;
+      pts.push({ t, v: v * scale });
+    }
+    pts.sort((a, b) => a.t - b.t);
+    if (pts.length) pts.push({ t: endMs, v: pts[pts.length - 1].v }); // extend to now
+    return pts;
+  }
+
+  /** Trapezoidal integral of a power(W) series → kWh. */
+  _integrate(series) {
+    let wh = 0;
+    for (let i = 1; i < series.length; i++) {
+      const dtH = (series[i].t - series[i - 1].t) / 3600000;
+      if (dtH > 0) wh += ((series[i].v + series[i - 1].v) / 2) * dtH;
+    }
+    return wh / 1000;
+  }
+
+  _computeGraphs(series, startMs, nowMs) {
+    const C = this._config;
+    let generated = this._integrate(series.solar);
+    let used = this._integrate(series.load);
+    let imported = this._integrate(series.import);
+    let exported = this._integrate(series.export);
+    let charged = this._integrate(series.charge);
+    let discharged = this._integrate(series.discharge);
+
+    // Optional overrides from dedicated daily kWh sensors.
+    const ov = (k) => (C[k] ? this._num(C[k]) : null);
+    const o = {
+      pv: ov("pv_energy_today_sensor"),
+      load: ov("load_energy_today_sensor"),
+      imp: ov("import_energy_today_sensor"),
+      exp: ov("export_energy_today_sensor"),
+      chg: ov("battery_charge_energy_today_sensor"),
+      dis: ov("battery_discharge_energy_today_sensor"),
+    };
+    if (o.pv !== null) generated = o.pv;
+    if (o.load !== null) used = o.load;
+    if (o.imp !== null) imported = o.imp;
+    if (o.exp !== null) exported = o.exp;
+    if (o.chg !== null) charged = o.chg;
+    if (o.dis !== null) discharged = o.dis;
+
+    const c0 = (x) => Math.max(0, x);
+    const solarSelf = c0(generated - exported - charged); // solar used on-site
+    const stats = {
+      selfSufficiency: used > 0 ? c0(1 - imported / used) : 0,
+      selfConsumption: generated > 0 ? c0(1 - exported / generated) : 0,
+    };
+    return {
+      kwh: { generated, used, imported, exported, charged, discharged },
+      disp: {
+        solarSelf,
+        charged,
+        exported,
+        homeFromSolar: solarSelf,
+        homeFromBattery: discharged,
+        homeFromGrid: imported,
+      },
+      stats,
+      series,
+      domain: { start: startMs, end: startMs + 86400000, now: nowMs },
+    };
+  }
+
+  /* ---- chart primitives ---- */
+
+  _scaleX(t, d) {
+    return ((t - d.start) / (d.end - d.start)) * 100;
+  }
+
+  _linePath(series, d, vmin, vmax, h) {
+    if (!series.length) return "";
+    const span = vmax - vmin || 1;
+    let out = "";
+    series.forEach((p, i) => {
+      const x = this._scaleX(p.t, d).toFixed(2);
+      const y = (h - ((p.v - vmin) / span) * h).toFixed(2);
+      out += (i ? " L" : "M") + x + " " + y;
+    });
+    return out;
+  }
+
+  _areaPath(series, d, vmin, vmax, h) {
+    if (!series.length) return "";
+    const line = this._linePath(series, d, vmin, vmax, h);
+    const x0 = this._scaleX(series[0].t, d).toFixed(2);
+    const x1 = this._scaleX(series[series.length - 1].t, d).toFixed(2);
+    return `${line} L ${x1} ${h} L ${x0} ${h} Z`;
+  }
+
+  _gridlines(h) {
+    return [0.25, 0.5, 0.75]
+      .map(
+        (f) =>
+          `<line x1="0" y1="${(h * f).toFixed(1)}" x2="100" y2="${(
+            h * f
+          ).toFixed(
+            1
+          )}" stroke="rgba(255,255,255,0.07)" stroke-width="0.5" vector-effect="non-scaling-stroke" />`
+      )
+      .join("");
+  }
+
+  _barRow(label, value, max, color) {
+    const pct = max > 0 ? Math.min(100, (value / max) * 100) : 0;
+    return `
+      <div class="sdc-g-bar">
+        <span class="sdc-g-bar-l">${label}</span>
+        <span class="sdc-g-bar-track"><span class="sdc-g-bar-fill" style="width:${pct.toFixed(
+          1
+        )}%;background:${color}"></span></span>
+        <span class="sdc-g-bar-v">${value.toFixed(2)} kWh</span>
+      </div>`;
+  }
+
+  _donut(segments, centerLabel) {
+    const total = segments.reduce((a, s) => a + Math.max(0, s.value), 0) || 1;
+    const r = 16;
+    const c = 2 * Math.PI * r;
+    let offset = 0;
+    const rings = segments
+      .map((s) => {
+        const len = (Math.max(0, s.value) / total) * c;
+        const seg = `<circle cx="21" cy="21" r="${r}" fill="none" stroke="${
+          s.color
+        }" stroke-width="7" stroke-dasharray="${len.toFixed(2)} ${(
+          c - len
+        ).toFixed(2)}" stroke-dashoffset="${(-offset).toFixed(
+          2
+        )}" transform="rotate(-90 21 21)" />`;
+        offset += len;
+        return seg;
+      })
+      .join("");
+    return `
+      <svg class="sdc-g-donut" viewBox="0 0 42 42">
+        <circle cx="21" cy="21" r="${r}" fill="none" stroke="rgba(255,255,255,0.08)" stroke-width="7" />
+        ${rings}
+        <text x="21" y="21" text-anchor="middle" dominant-baseline="central" class="sdc-g-donut-c">${centerLabel}</text>
+      </svg>`;
+  }
+
+  _legend(items) {
+    return `<div class="sdc-g-legend">${items
+      .map(
+        (i) =>
+          `<span><i style="background:${i.c}"></i>${i.l}${
+            i.v !== undefined ? ` <b>${i.v}</b>` : ""
+          }</span>`
+      )
+      .join("")}</div>`;
+  }
+
+  _drawGraphs() {
+    const g = this._graphData;
+    const host = this._els.graphsEl;
+    if (!g || !host) return;
+    const k = g.kwh;
+    const P = GRAPH_PALETTE;
+    const H = 60;
+    const s = g.series;
+    const d = g.domain;
+
+    // stat tiles
+    const tiles = [
+      { k: "Generated", v: k.generated.toFixed(1) + " kWh", c: P.pv },
+      { k: "Used", v: k.used.toFixed(1) + " kWh", c: P.load },
+      {
+        k: "Self-sufficiency",
+        v: Math.round(g.stats.selfSufficiency * 100) + "%",
+        c: P.exp,
+      },
+      {
+        k: "Self-consumption",
+        v: Math.round(g.stats.selfConsumption * 100) + "%",
+        c: P.chg,
+      },
+    ]
+      .map(
+        (t) =>
+          `<div class="sdc-g-tile"><span class="sdc-g-tile-v" style="color:${t.c}">${t.v}</span><span class="sdc-g-tile-k">${t.k}</span></div>`
+      )
+      .join("");
+
+    // energy summary bars
+    const maxBar = Math.max(
+      k.generated,
+      k.used,
+      k.imported,
+      k.exported,
+      k.charged,
+      k.discharged,
+      0.1
+    );
+    const bars =
+      this._barRow("Generated (PV)", k.generated, maxBar, P.pv) +
+      this._barRow("Used (load)", k.used, maxBar, P.load) +
+      this._barRow("Imported (bought)", k.imported, maxBar, P.imp) +
+      this._barRow("Exported (sold)", k.exported, maxBar, P.exp) +
+      this._barRow("Stored (charged)", k.charged, maxBar, P.chg) +
+      this._barRow("Discharged", k.discharged, maxBar, P.dis);
+
+    // dispersion donuts
+    const homeDonut = this._donut(
+      [
+        { label: "Solar", value: g.disp.homeFromSolar, color: P.pv },
+        { label: "Battery", value: g.disp.homeFromBattery, color: P.dis },
+        { label: "Grid", value: g.disp.homeFromGrid, color: P.imp },
+      ],
+      Math.round(g.stats.selfSufficiency * 100) + "%"
+    );
+    const solarDonut = this._donut(
+      [
+        { label: "Home", value: g.disp.solarSelf, color: P.load },
+        { label: "Battery", value: g.disp.charged, color: P.chg },
+        { label: "Grid", value: g.disp.exported, color: P.exp },
+      ],
+      Math.round(g.stats.selfConsumption * 100) + "%"
+    );
+
+    // power-over-day chart
+    let vmax = 100;
+    ["solar", "load", "import", "export", "charge", "discharge"].forEach((key) =>
+      s[key].forEach((p) => {
+        if (p.v > vmax) vmax = p.v;
+      })
+    );
+    const line = (key, color) =>
+      `<path d="${this._linePath(
+        s[key],
+        d,
+        0,
+        vmax,
+        H
+      )}" fill="none" stroke="${color}" stroke-width="1.6" vector-effect="non-scaling-stroke" />`;
+    const powerSvg = `
+      <svg class="sdc-g-line" viewBox="0 0 100 ${H}" preserveAspectRatio="none">
+        ${this._gridlines(H)}
+        <path d="${this._areaPath(s.solar, d, 0, vmax, H)}" fill="${P.pv}22" stroke="none" />
+        ${line("solar", P.pv)}
+        ${line("load", P.load)}
+        ${line("import", P.imp)}
+        ${line("export", P.exp)}
+        ${line("charge", P.chg)}
+        ${line("discharge", P.dis)}
+      </svg>`;
+
+    // battery SoC chart
+    const socSvg = `
+      <svg class="sdc-g-line" viewBox="0 0 100 ${H}" preserveAspectRatio="none">
+        ${this._gridlines(H)}
+        <path d="${this._areaPath(s.soc, d, 0, 100, H)}" fill="${P.soc}22" stroke="none" />
+        <path d="${this._linePath(
+          s.soc,
+          d,
+          0,
+          100,
+          H
+        )}" fill="none" stroke="${P.soc}" stroke-width="1.6" vector-effect="non-scaling-stroke" />
+      </svg>`;
+
+    const xAxis = `<div class="sdc-g-x"><span>12am</span><span>6am</span><span>12pm</span><span>6pm</span><span>12am</span></div>`;
+    const socNow = this._num(this._config.battery_soc_sensor);
+
+    host.innerHTML = `
+      <div class="sdc-g-tiles">${tiles}</div>
+
+      <div class="sdc-g-panel">
+        <div class="sdc-g-h">Daily energy summary</div>
+        <div class="sdc-g-bars">${bars}</div>
+      </div>
+
+      <div class="sdc-g-panel">
+        <div class="sdc-g-h">Energy dispersion</div>
+        <div class="sdc-g-donuts">
+          <div class="sdc-g-donut-box">
+            ${homeDonut}
+            <div class="sdc-g-donut-cap">Home supply</div>
+            ${this._legend([
+              { l: "Solar", c: P.pv },
+              { l: "Battery", c: P.dis },
+              { l: "Grid", c: P.imp },
+            ])}
+          </div>
+          <div class="sdc-g-donut-box">
+            ${solarDonut}
+            <div class="sdc-g-donut-cap">Solar usage</div>
+            ${this._legend([
+              { l: "Home", c: P.load },
+              { l: "Battery", c: P.chg },
+              { l: "Grid", c: P.exp },
+            ])}
+          </div>
+        </div>
+      </div>
+
+      <div class="sdc-g-panel">
+        <div class="sdc-g-h">Power today</div>
+        ${powerSvg}
+        ${xAxis}
+        ${this._legend([
+          { l: "Solar", c: P.pv },
+          { l: "Load", c: P.load },
+          { l: "Import", c: P.imp },
+          { l: "Export", c: P.exp },
+          { l: "Charge", c: P.chg },
+          { l: "Discharge", c: P.dis },
+        ])}
+      </div>
+
+      <div class="sdc-g-panel">
+        <div class="sdc-g-h">Battery charge today${
+          socNow !== null ? ` · now ${Math.round(socNow)}%` : ""
+        }</div>
+        ${socSvg}
+        ${xAxis}
+      </div>
+
+      <div class="sdc-g-note">
+        kWh figures are integrated from live power history since local midnight.
+        Configure the optional <code>*_energy_today_sensor</code> options for metered accuracy.
+      </div>`;
+  }
+
   /* ---- styles ---- */
 
   _styles() {
@@ -1192,6 +1670,88 @@ class SolarDashboardCard extends HTMLElement {
       .sdc-d-label { color: var(--sdc-muted); }
       .sdc-d-value { font-weight:600; text-align:right; }
 
+      /* Graphs */
+      .sdc-graphs-wrap { border-top:1px solid rgba(255,255,255,0.06); }
+      .sdc-graphs-toggle {
+        width:100%;
+        display:flex;
+        align-items:center;
+        gap:8px;
+        padding:11px 14px;
+        background:none;
+        border:none;
+        color: var(--sdc-fg);
+        font-family:inherit;
+        font-size:0.84rem;
+        font-weight:600;
+        cursor:pointer;
+      }
+      .sdc-graphs-toggle ha-icon { --mdc-icon-size:18px; color: var(--sdc-muted); }
+      .sdc-graphs-toggle .sdc-chevron { margin-left:auto; transition: transform .25s ease; }
+      .sdc-graphs-wrap.collapsed .sdc-chevron { transform: rotate(-90deg); }
+      .sdc-graphs { padding: 0 12px 12px; display:flex; flex-direction:column; gap:10px; }
+      .sdc-graphs-wrap.collapsed .sdc-graphs { display:none; }
+      .sdc-g-empty { padding:18px; text-align:center; color: var(--sdc-muted); font-size:0.85rem; }
+
+      .sdc-g-tiles {
+        display:grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap:8px;
+      }
+      .sdc-g-tile {
+        background: var(--sdc-panel);
+        border:1px solid rgba(255,255,255,0.06);
+        border-radius:10px;
+        padding:9px 6px;
+        display:flex;
+        flex-direction:column;
+        align-items:center;
+        gap:2px;
+      }
+      .sdc-g-tile-v { font-size:1rem; font-weight:800; }
+      .sdc-g-tile-k { font-size:0.6rem; text-transform:uppercase; letter-spacing:0.04em; color: var(--sdc-muted); text-align:center; }
+
+      .sdc-g-panel {
+        background: var(--sdc-panel);
+        border:1px solid rgba(255,255,255,0.06);
+        border-radius:12px;
+        padding:12px 14px;
+      }
+      .sdc-g-h {
+        font-size:0.72rem;
+        text-transform:uppercase;
+        letter-spacing:0.05em;
+        color: var(--sdc-muted);
+        margin-bottom:10px;
+        font-weight:700;
+      }
+
+      .sdc-g-bars { display:flex; flex-direction:column; gap:7px; }
+      .sdc-g-bar { display:grid; grid-template-columns: 110px 1fr 76px; align-items:center; gap:8px; }
+      .sdc-g-bar-l { font-size:0.72rem; color: var(--sdc-muted); }
+      .sdc-g-bar-track { height:10px; border-radius:6px; background: rgba(255,255,255,0.08); overflow:hidden; }
+      .sdc-g-bar-fill { display:block; height:100%; border-radius:6px; transition: width .5s ease; }
+      .sdc-g-bar-v { font-size:0.74rem; font-weight:700; text-align:right; }
+
+      .sdc-g-donuts { display:grid; grid-template-columns: 1fr 1fr; gap:10px; }
+      .sdc-g-donut-box { display:flex; flex-direction:column; align-items:center; gap:6px; }
+      .sdc-g-donut { width:96px; height:96px; }
+      .sdc-g-donut-c { fill: var(--sdc-fg); font-size:8px; font-weight:800; }
+      .sdc-g-donut-cap { font-size:0.7rem; color: var(--sdc-muted); }
+
+      .sdc-g-line { width:100%; height:140px; display:block; }
+      .sdc-g-x { display:flex; justify-content:space-between; font-size:0.62rem; color: var(--sdc-muted); margin-top:3px; }
+
+      .sdc-g-legend {
+        display:flex; flex-wrap:wrap; gap:6px 12px; margin-top:8px;
+        font-size:0.68rem; color: var(--sdc-muted);
+      }
+      .sdc-g-legend span { display:inline-flex; align-items:center; gap:4px; }
+      .sdc-g-legend i { width:9px; height:9px; border-radius:2px; display:inline-block; }
+      .sdc-g-legend b { color: var(--sdc-fg); font-weight:700; }
+      .sdc-g-note { font-size:0.68rem; color: var(--sdc-muted); line-height:1.4; }
+      .sdc-g-note code { background: rgba(255,255,255,0.08); padding:1px 4px; border-radius:4px; }
+
       /* Responsive */
       @media (max-width: 600px) {
         .sdc-node-ring { width:42px; height:42px; }
@@ -1202,6 +1762,9 @@ class SolarDashboardCard extends HTMLElement {
         .sdc-cards { grid-template-columns: 1fr; }
         .sdc-d-grid { grid-template-columns: 1fr; }
         .sdc-stat-v { font-size:0.86rem; }
+        .sdc-g-tiles { grid-template-columns: repeat(2, 1fr); }
+        .sdc-g-bar { grid-template-columns: 90px 1fr 64px; }
+        .sdc-g-bar-l { font-size:0.66rem; }
       }
     `;
   }
@@ -1256,6 +1819,17 @@ const ENTITY_SECTIONS = [
       ["export_energy_quarter_sensor", "Export energy — quarter (kWh)"],
     ],
   },
+  {
+    title: "Graphs — optional daily kWh sensors (override integrated values)",
+    fields: [
+      ["pv_energy_today_sensor", "Generated today (kWh)"],
+      ["load_energy_today_sensor", "Used today (kWh)"],
+      ["import_energy_today_sensor", "Imported today (kWh)"],
+      ["export_energy_today_sensor", "Exported today (kWh)"],
+      ["battery_charge_energy_today_sensor", "Charged today (kWh)"],
+      ["battery_discharge_energy_today_sensor", "Discharged today (kWh)"],
+    ],
+  },
 ];
 
 const NUMBER_FIELDS = [
@@ -1263,6 +1837,7 @@ const NUMBER_FIELDS = [
   ["export_tariff", "Export tariff ($/kWh)", 0.01],
   ["quarter_days", "Days in quarter", 1],
   ["poll_interval", "Poll interval (s)", 1],
+  ["graph_poll_interval", "Graph refresh (s)", 10],
 ];
 
 const IMAGE_KEYS = [
@@ -1413,6 +1988,18 @@ class SolarDashboardCardEditor extends HTMLElement {
               this._config.use_rest ? "checked" : ""
             } />
             <span>Also poll /api/states (REST)</span>
+          </label>
+          <label class="sdc-f sdc-check">
+            <input type="checkbox" data-boolexp="show_graphs" ${
+              this._config.show_graphs === false ? "" : "checked"
+            } />
+            <span>Show statistics &amp; graphs</span>
+          </label>
+          <label class="sdc-f sdc-check">
+            <input type="checkbox" data-bool="graphs_collapsed" ${
+              this._config.graphs_collapsed ? "checked" : ""
+            } />
+            <span>Start graphs collapsed</span>
           </label>
           <label class="sdc-f">
             <span>Title (optional)</span>
@@ -1573,6 +2160,13 @@ class SolarDashboardCardEditor extends HTMLElement {
       el.addEventListener("change", (e) =>
         this._set(e.target.dataset.bool, e.target.checked ? true : "")
       )
+    );
+    root.querySelectorAll("input[data-boolexp]").forEach((el) =>
+      el.addEventListener("change", (e) => {
+        // explicit boolean — store true/false literally (no default fallback)
+        this._config[e.target.dataset.boolexp] = e.target.checked;
+        this._emit();
+      })
     );
     root.querySelectorAll("input[data-node]").forEach((el) =>
       el.addEventListener("change", (e) =>
