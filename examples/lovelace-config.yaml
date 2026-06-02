@@ -1,0 +1,99 @@
+# ---------------------------------------------------------------------------
+# Solar Dashboard Card — sample Lovelace configuration
+# ---------------------------------------------------------------------------
+# Paste this into a dashboard view (YAML mode) or use the "Manual" card and
+# replace the entity IDs / images / node positions to match your system.
+# All image paths MUST use /local/ (mapped to <config>/www/), never Windows paths.
+# ---------------------------------------------------------------------------
+
+type: custom:solar-dashboard-card
+title: Solar Energy            # optional header (omit for none)
+
+# --- Core energy entities ---------------------------------------------------
+solar_generation_sensor: sensor.goodwe_pv_power
+load_power_sensor: sensor.goodwe_house_consumption
+battery_charge_sensor: sensor.battery_charging_2
+battery_discharge_sensor: sensor.battery_discharging
+battery_soc_sensor: sensor.goodwe_battery_state_of_charge
+battery_soh_sensor: sensor.goodwe_battery_state_of_health
+
+# Grid. These keys are aliases — the value mapped to *import* is power drawn
+# FROM the grid (Grid -> Home); *export* is power sent TO the grid (Solar -> Grid).
+grid_feed_in_sensor: sensor.grid_import_power      # = grid_import_sensor
+grid_consumption_sensor: sensor.grid_export_power  # = grid_export_sensor
+# Or use the explicit semantic keys instead (these take precedence):
+# grid_import_sensor: sensor.grid_import_power
+# grid_export_sensor: sensor.grid_export_power
+
+# --- Weather / day-night image switching ------------------------------------
+weather_entity: weather.raceview
+sunrise_sensor: sensor.raceview_astronomical_sunrise_time_0
+sunset_sensor: sensor.raceview_astronomical_sunset_time_0
+day_cycle_boolean: input_boolean.energy_house_image_day_cycle   # off = always day image
+details_overlay_boolean: input_boolean.energy_vision_details    # on = show details grid
+
+# --- Cost estimate ----------------------------------------------------------
+import_tariff: 0.24
+export_tariff: 0.40
+quarter_days: 91
+# For an ACCURATE quarter cost, point these at kWh totals for the period:
+# import_energy_sensor: sensor.grid_import_energy_quarter
+# export_energy_sensor: sensor.grid_export_energy_quarter
+
+# --- Behaviour --------------------------------------------------------------
+poll_interval: 10     # seconds
+use_rest: false       # set true to also poll /api/states (usually unnecessary)
+solar_label: Solar
+
+# --- Images (weather + day/night) -------------------------------------------
+images:
+  default: /local/Sunny.png
+  sunny_day: /local/Sunny.png
+  rainy_day: /local/Raining.png
+  lightning_rainy_day: /local/Thunderstorm.png
+  cloudy_day: /local/Cloudy.png
+  clear_night: /local/Night.png
+  rainy_night: /local/Night Raining.png
+  lightning_rainy_night: /local/Night Thunderstorm.png
+
+# --- Node positions (percentages of the image, 0-100) -----------------------
+# Tune these to line up with YOUR house image.
+nodes:
+  solar:
+    x: 45
+    y: 18
+  home:
+    x: 50
+    y: 58
+  battery:
+    x: 76
+    y: 53
+  grid:
+    x: 90
+    y: 30
+
+# ---------------------------------------------------------------------------
+# Extended/detail entities (only rendered when details_overlay_boolean is "on")
+# ---------------------------------------------------------------------------
+inverter_temp_sensor: sensor.goodwe_inverter_temperature_module
+ambient_temp_sensor: sensor.goodwe_inverter_temperature_air
+battery_temp_sensor: sensor.goodwe_battery_temperature
+cell_temp_low_sensor: sensor.goodwe_battery_min_cell_temperature
+cell_temp_high_sensor: sensor.goodwe_battery_max_cell_temperature
+grid_voltage_sensor: sensor.goodwe_on_grid_l1_voltage
+grid_current_sensor: sensor.goodwe_on_grid_l1_current
+inverter_fault_sensor: sensor.goodwe_errors
+inverter_state_sensor: sensor.goodwe_grid_mode
+work_mode_select: sensor.goodwe_work_mode
+pv1_power_sensor: sensor.goodwe_pv1_power
+pv1_current_sensor: sensor.goodwe_pv1_current
+pv1_voltage_sensor: sensor.goodwe_pv1_voltage
+pv2_power_sensor: sensor.goodwe_pv2_power
+pv2_current_sensor: sensor.goodwe_pv2_current
+pv2_voltage_sensor: sensor.goodwe_pv2_voltage
+pv3_power_sensor: sensor.goodwe_pv3_power
+pv3_current_sensor: sensor.goodwe_pv3_current
+pv3_voltage_sensor: sensor.goodwe_pv3_voltage
+pv4_power_sensor: sensor.goodwe_pv4_power
+pv4_current_sensor: sensor.goodwe_pv4_current
+pv4_voltage_sensor: sensor.goodwe_pv4_voltage

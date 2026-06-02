@@ -1,0 +1,7 @@
+{
+  "name": "Solar Dashboard Card",
+  "render_readme": true,
+  "filename": "solar-dashboard-card.js",
+  "content_in_root": false,
+  "homeassistant": "2023.4.0"
+}

@@ -1,0 +1,88 @@
+# ===========================================================================
+# Accurate quarterly cost — energy meters for Solar Dashboard Card
+# ===========================================================================
+# The cost card is only an ESTIMATE while it sees instantaneous power (W).
+# To get an accurate quarter cost you need cumulative ENERGY (kWh) that resets
+# each quarter, then point the card at those sensors:
+#
+#   import_energy_sensor: sensor.grid_import_energy_quarter
+#   export_energy_sensor: sensor.grid_export_energy_quarter
+#
+# Two paths below — pick ONE depending on what your integration already gives you.
+# ---------------------------------------------------------------------------
+# HOW TO ADD: put this in your configuration.yaml (or a package). If you use a
+# packages folder, drop this file in <config>/packages/ and ensure you have:
+#   homeassistant:
+#     packages: !include_dir_named packages
+# Then restart Home Assistant (utility_meter + integration require a restart).
+# You can also create both via the UI: Settings → Devices & Services → Helpers
+#   → "Integration - Riemann sum" and "Utility Meter" (no restart needed).
+# ===========================================================================
+
+
+# ---------------------------------------------------------------------------
+# PATH A — you only have POWER sensors (the GoodWe defaults: W)
+# Convert power (W) → energy (kWh) with a Riemann-sum integration sensor,
+# then meter it quarterly.
+# ---------------------------------------------------------------------------
+sensor:
+  - platform: integration
+    name: Grid Import Energy
+    unique_id: grid_import_energy_riemann
+    source: sensor.grid_import_power      # power drawn FROM the grid (W)
+    unit_prefix: k                        # output in kWh
+    unit_time: h
+    round: 3
+    method: left                          # left-Riemann is best for noisy power
+
+  - platform: integration
+    name: Grid Export Energy
+    unique_id: grid_export_energy_riemann
+    source: sensor.grid_export_power      # power sent TO the grid (W)
+    unit_prefix: k
+    unit_time: h
+    round: 3
+    method: left
+
+utility_meter:
+  grid_import_energy_quarter:
+    name: Grid Import Energy (Quarter)
+    source: sensor.grid_import_energy     # the integration sensor above
+    cycle: quarterly                      # resets every 3 months
+  grid_export_energy_quarter:
+    name: Grid Export Energy (Quarter)
+    source: sensor.grid_export_energy
+    cycle: quarterly
+
+
+# ---------------------------------------------------------------------------
+# PATH B — you ALREADY have cumulative kWh sensors from the GoodWe / energy
+# integration (e.g. sensor.goodwe_total_energy_import / ..._export). In that
+# case DELETE the `sensor:` block above and feed those kWh sensors straight
+# into utility_meter instead:
+#
+# utility_meter:
+#   grid_import_energy_quarter:
+#     name: Grid Import Energy (Quarter)
+#     source: sensor.goodwe_total_energy_import   # <-- your real kWh total
+#     cycle: quarterly
+#   grid_export_energy_quarter:
+#     name: Grid Export Energy (Quarter)
+#     source: sensor.goodwe_total_energy_export
+#     cycle: quarterly
+# ---------------------------------------------------------------------------
+
+
+# ===========================================================================
+# Then in the card config:
+#
+#   type: custom:solar-dashboard-card
+#   ...
+#   import_tariff: 0.24
+#   export_tariff: 0.40
+#   import_energy_sensor: sensor.grid_import_energy_quarter
+#   export_energy_sensor: sensor.grid_export_energy_quarter
+#
+# The cost card will switch from "ESTIMATE" to "FROM ENERGY" and compute:
+#   cost = import_kWh × import_tariff − export_kWh × export_tariff
+# ===========================================================================

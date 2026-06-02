@@ -1,0 +1,12 @@
+# OS / editor
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
+.vscode/
+.idea/
+
+# Node (only if you later add tooling — the card itself needs no build)
+node_modules/
+npm-debug.log*
+yarn-error.log*
