@@ -247,10 +247,8 @@ to hide the section entirely, or `graphs_collapsed: true` to start it folded.
 | `poll_interval` | number | `10` | Refresh interval in seconds. |
 | `use_rest` | bool | `false` | Also poll `/api/states` via `hass.callApi` (usually unnecessary; `hass.states` is preferred). |
 | `solar_label` | string | `Solar` | Label for the solar node. |
-| `flow_power_color` | colour | `#21e065` | Colour of the moving flow dots for generation/supply (green). |
-| `flow_consumption_color` | colour | `#ffc233` | Colour of the moving flow dots for grid consumption (amber). |
-| `flow_battery_grid_color` | colour | `#7c5cff` | Default colour for grid↔battery flows. |
-| `flow_colors` | map | _(per-kind)_ | **Per-direction** colour overrides. Keys: `solar_home`, `solar_battery`, `solar_grid`, `battery_home`, `grid_home`, `grid_battery`, `battery_grid`. Each falls back to the matching kind default above. |
+| `flow_colors` | map | _(see below)_ | **Per-direction** flow-dot colours. Keys: `solar_home`, `solar_battery`, `solar_grid`, `battery_home`, `grid_home`, `grid_battery`, `battery_grid`. Defaults: solar/battery→home/grid `#21e065` (green), `grid_home` `#ffc233` (amber), `grid_battery`/`battery_grid` `#7c5cff` (violet). |
+| `node_colors` | map | _(see below)_ | Per-node accent colours (the ring/glow shown when a node is active). Keys: `solar` (`#f5c542`), `battery` (`#38d39f`), `grid` (`#ff5d5d`). Home has no bubble — set its colour via `home_glow_color`. |
 | `home_glow_enabled` | bool | `true` | Render the home as a glow over the house instead of a node bubble. |
 | `home_glow_color` | colour | `#ffcf6b` | Colour of the house glow (lit when the home is consuming). |
 | `home_glow_blur` | number | `14` | Glow softness/size in px (both glow modes). |
@@ -358,7 +356,8 @@ from the radial box; `home_glow_color`/`home_glow_blur` still apply.
 
 ### Per-direction flow colours
 
-Give every flow its own colour (each falls back to the kind default if unset):
+Give every flow its own colour (each unset key falls back to its built-in
+default):
 
 ```yaml
 flow_colors:
@@ -369,6 +368,18 @@ flow_colors:
   grid_home: "#ffc233"
   grid_battery: "#7c5cff"
   battery_grid: "#b06bff"
+```
+
+### Node colours
+
+Pick the accent colour each node lights up with when active. Home is the house
+glow, so set it with `home_glow_color` instead.
+
+```yaml
+node_colors:
+  solar: "#f5c542"
+  battery: "#38d39f"
+  grid: "#ff5d5d"
 ```
 
 ---

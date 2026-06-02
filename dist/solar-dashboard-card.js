@@ -97,14 +97,15 @@ const DEFAULTS = {
   poll_interval: 10, // seconds
   use_rest: false, // optional /api/states REST polling
 
-  // Appearance — flow-dot colours.
-  // These are the per-"kind" defaults; override any individual direction in
-  // flow_colors (keys: solar_home, solar_battery, solar_grid, battery_home,
-  // grid_home, grid_battery, battery_grid).
-  flow_power_color: "#21e065", // green: generation / supply
-  flow_consumption_color: "#ffc233", // amber: grid draw to home
-  flow_battery_grid_color: "#7c5cff", // violet: grid<->battery
+  // Appearance — flow-dot colours, set per direction (no per-kind defaults).
+  // Keys: solar_home, solar_battery, solar_grid, battery_home, grid_home,
+  // grid_battery, battery_grid. Anything unset uses FLOW_DEFAULTS.
   flow_colors: {}, // per-direction overrides
+
+  // Node accent colours (the ring/glow shown when a node is active). Home has
+  // no bubble — it is the house glow (home_glow_color), configured separately.
+  // Keys: solar, battery, grid. Anything unset uses NODE_COLOR_DEFAULTS.
+  node_colors: {}, // per-node overrides
 
   // Home is rendered as a glow over the house (no node bubble).
   home_glow_enabled: true,
@@ -165,6 +166,25 @@ const GRAPH_PALETTE = {
   soc: "#21e065", // battery state of charge
 };
 
+/* Per-direction flow-dot colours. There is no per-"kind" grouping any more —
+ * each direction has its own colour, overridable via the flow_colors config. */
+const FLOW_DEFAULTS = {
+  solar_home: "#21e065",
+  solar_battery: "#21e065",
+  solar_grid: "#21e065",
+  battery_home: "#21e065",
+  grid_home: "#ffc233",
+  grid_battery: "#7c5cff",
+  battery_grid: "#7c5cff",
+};
+
+/* Per-node accent colours (home is the house glow, configured separately). */
+const NODE_COLOR_DEFAULTS = {
+  solar: "#f5c542",
+  battery: "#38d39f",
+  grid: "#ff5d5d",
+};
+
 /* ------------------------------------------------------------------ *
  * Card
  * ------------------------------------------------------------------ */
@@ -201,6 +221,7 @@ class SolarDashboardCard extends HTMLElement {
     };
     merged.home_glow = { ...DEFAULTS.home_glow, ...(config.home_glow || {}) };
     merged.flow_colors = { ...(config.flow_colors || {}) };
+    merged.node_colors = { ...(config.node_colors || {}) };
     this._config = this._resolveEntities(merged);
     this._built = false; // force rebuild
     if (this.shadowRoot) this.shadowRoot.innerHTML = "";
@@ -491,18 +512,17 @@ class SolarDashboardCard extends HTMLElement {
     return `M ${a.x} ${a.y} L ${b.x} ${b.y}`;
   }
 
-  /** Per-direction colour, falling back to the kind default. */
+  /** Per-direction flow-dot colour. */
   _resolveFlowColor(f) {
-    const C = this._config;
-    const fc = C.flow_colors || {};
+    const fc = this._config.flow_colors || {};
     const key = f.id.split("-").join("_"); // "solar-home" -> "solar_home"
-    if (fc[key]) return fc[key];
-    const def = {
-      power: C.flow_power_color || "#21e065",
-      consume: C.flow_consumption_color || "#ffc233",
-      battgrid: C.flow_battery_grid_color || "#7c5cff",
-    };
-    return def[f.kind];
+    return fc[key] || FLOW_DEFAULTS[key] || "#21e065";
+  }
+
+  /** Per-node accent colour (used for the active ring/glow). */
+  _resolveNodeColor(id) {
+    const nc = this._config.node_colors || {};
+    return nc[id] || NODE_COLOR_DEFAULTS[id] || "#21e065";
   }
 
   _bezier(a, b) {
@@ -578,7 +598,9 @@ class SolarDashboardCard extends HTMLElement {
 
     const node = (id, label) => `
       <button class="sdc-node sdc-node-${id}" data-node="${id}"
-              style="left:${n[id].x}%;top:${n[id].y}%"
+              style="left:${n[id].x}%;top:${n[id].y}%;--nc:${this._resolveNodeColor(
+      id
+    )}"
               title="${label}">
         <span class="sdc-node-ring">
           <ha-icon id="icon-${id}" icon="${icons[id]}"></ha-icon>
@@ -1461,18 +1483,12 @@ class SolarDashboardCard extends HTMLElement {
   /* ---- styles ---- */
 
   _styles() {
-    const powerColor = this._config.flow_power_color || "#21e065";
-    const consumeColor = this._config.flow_consumption_color || "#ffc233";
-    const battgridColor = this._config.flow_battery_grid_color || "#7c5cff";
     return `
       :host { display:block; }
       ha-card {
         --sdc-bg: var(--card-background-color, #11151c);
         --sdc-fg: var(--primary-text-color, #e1e1e1);
         --sdc-muted: var(--secondary-text-color, #9aa0a6);
-        --sdc-flow-power: ${powerColor};
-        --sdc-flow-consume: ${consumeColor};
-        --sdc-flow-battgrid: ${battgridColor};
         --sdc-solar: #f5c542;
         --sdc-grid: #ff5d5d;
         --sdc-battery: #38d39f;
@@ -1636,11 +1652,9 @@ class SolarDashboardCard extends HTMLElement {
       }
       .sdc-node-value { font-size:0.82rem; font-weight:700; color: var(--sdc-fg); }
 
-      /* per-node accent colour (ties into the flow palette) */
-      .sdc-node-solar   { --nc: var(--sdc-flow-power); }
-      .sdc-node-battery { --nc: var(--sdc-flow-power); }
-      .sdc-node-home    { --nc: var(--sdc-flow-consume); }
-      .sdc-node-grid    { --nc: var(--sdc-flow-consume); }
+      /* per-node accent colour (--nc) is set inline from node_colors config;
+         this fallback keeps the ring sane if it is ever missing */
+      .sdc-node { --nc: #21e065; }
 
       .sdc-node.active .sdc-node-ring {
         color: var(--nc);
@@ -2009,6 +2023,12 @@ class SolarDashboardCardEditor extends HTMLElement {
     this._emit();
   }
 
+  _setNodeColor(key, value) {
+    if (!this._config.node_colors) this._config.node_colors = {};
+    this._config.node_colors[key] = value;
+    this._emit();
+  }
+
   _setHomeGlow(axis, value) {
     if (!this._config.home_glow) this._config.home_glow = {};
     const n = parseFloat(value);
@@ -2120,14 +2140,6 @@ class SolarDashboardCardEditor extends HTMLElement {
         </div>
       </div>`;
 
-    const colorInput = (key, label) => `
-      <label class="sdc-f sdc-color">
-        <span>${label}</span>
-        <input type="color" data-color="${key}" value="${
-      this._config[key] || d[key]
-    }" />
-      </label>`;
-
     const costPeriod = `
       <div class="sdc-sec">
         <div class="sdc-sec-h">Cost period</div>
@@ -2142,29 +2154,12 @@ class SolarDashboardCardEditor extends HTMLElement {
         </div>
       </div>`;
 
-    const appearance = `
-      <div class="sdc-sec">
-        <div class="sdc-sec-h">Flow colours — defaults per kind</div>
-        <div class="sdc-grid">
-          ${colorInput("flow_power_color", "Power / generation (green)")}
-          ${colorInput("flow_consumption_color", "Grid consumption (amber)")}
-          ${colorInput("flow_battery_grid_color", "Grid ↔ battery (violet)")}
-        </div>
-      </div>`;
-
-    const flowKindColor = (kind) =>
-      ({
-        power: this._config.flow_power_color || "#21e065",
-        consume: this._config.flow_consumption_color || "#ffc233",
-        battgrid: this._config.flow_battery_grid_color || "#7c5cff",
-      }[kind]);
-
-    const flowColorInput = (key, label, kind) => `
+    const flowColorInput = (key, label) => `
       <label class="sdc-f sdc-color">
         <span>${label}</span>
         <input type="color" data-flowcolor="${key}" value="${
       (this._config.flow_colors && this._config.flow_colors[key]) ||
-      flowKindColor(kind)
+      FLOW_DEFAULTS[key]
     }" />
       </label>`;
 
@@ -2172,13 +2167,32 @@ class SolarDashboardCardEditor extends HTMLElement {
       <div class="sdc-sec">
         <div class="sdc-sec-h">Flow colours — per direction</div>
         <div class="sdc-grid">
-          ${flowColorInput("solar_home", "Solar → Home", "power")}
-          ${flowColorInput("solar_battery", "Solar → Battery", "power")}
-          ${flowColorInput("solar_grid", "Solar → Grid", "power")}
-          ${flowColorInput("battery_home", "Battery → Home", "power")}
-          ${flowColorInput("grid_home", "Grid → Home", "consume")}
-          ${flowColorInput("grid_battery", "Grid → Battery", "battgrid")}
-          ${flowColorInput("battery_grid", "Battery → Grid", "battgrid")}
+          ${flowColorInput("solar_home", "Solar → Home")}
+          ${flowColorInput("solar_battery", "Solar → Battery")}
+          ${flowColorInput("solar_grid", "Solar → Grid")}
+          ${flowColorInput("battery_home", "Battery → Home")}
+          ${flowColorInput("grid_home", "Grid → Home")}
+          ${flowColorInput("grid_battery", "Grid → Battery")}
+          ${flowColorInput("battery_grid", "Battery → Grid")}
+        </div>
+      </div>`;
+
+    const nodeColorInput = (key, label) => `
+      <label class="sdc-f sdc-color">
+        <span>${label}</span>
+        <input type="color" data-nodecolor="${key}" value="${
+      (this._config.node_colors && this._config.node_colors[key]) ||
+      NODE_COLOR_DEFAULTS[key]
+    }" />
+      </label>`;
+
+    const nodeColours = `
+      <div class="sdc-sec">
+        <div class="sdc-sec-h">Node colours</div>
+        <div class="sdc-grid">
+          ${nodeColorInput("solar", "Solar")}
+          ${nodeColorInput("battery", "Battery")}
+          ${nodeColorInput("grid", "Grid")}
         </div>
       </div>`;
 
@@ -2313,8 +2327,8 @@ class SolarDashboardCardEditor extends HTMLElement {
       ${sections}
       ${numbers}
       ${costPeriod}
-      ${appearance}
       ${flowColours}
+      ${nodeColours}
       ${homeGlowSec}
       ${nodes}
       ${images}
@@ -2385,6 +2399,11 @@ class SolarDashboardCardEditor extends HTMLElement {
     root.querySelectorAll("input[data-flowcolor]").forEach((el) =>
       el.addEventListener("change", (e) =>
         this._setFlowColor(e.target.dataset.flowcolor, e.target.value)
+      )
+    );
+    root.querySelectorAll("input[data-nodecolor]").forEach((el) =>
+      el.addEventListener("change", (e) =>
+        this._setNodeColor(e.target.dataset.nodecolor, e.target.value)
       )
     );
     root.querySelectorAll("input[data-glow]").forEach((el) =>

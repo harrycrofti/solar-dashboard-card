@@ -46,11 +46,7 @@ quarter_days: 91               # legacy fallback only
 # export_energy_quarter_sensor: sensor.grid_export_energy_quarter
 
 # --- Flow colours -----------------------------------------------------------
-# Per-kind defaults:
-flow_power_color: "#21e065"          # green: generation / supply
-flow_consumption_color: "#ffc233"    # amber: grid -> home
-flow_battery_grid_color: "#7c5cff"   # violet: grid <-> battery
-# Per-direction overrides (each falls back to the kind default above):
+# Per-direction flow-dot colours (each unset key uses its built-in default):
 flow_colors:
   solar_home: "#21e065"
   solar_battery: "#21e065"
@@ -59,6 +55,14 @@ flow_colors:
   grid_home: "#ffc233"
   grid_battery: "#7c5cff"
   battery_grid: "#b06bff"
+
+# --- Node colours -----------------------------------------------------------
+# Accent colour each node lights up with when active. Home is the house glow
+# (set home_glow_color below), so it has no entry here.
+node_colors:
+  solar: "#f5c542"
+  battery: "#38d39f"
+  grid: "#ff5d5d"
 
 # --- Home glow (house) ------------------------------------------------------
 home_glow_enabled: true
