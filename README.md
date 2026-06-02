@@ -136,7 +136,13 @@ autocomplete), tariffs/behaviour, node positions and image paths.
 
 Choose which cost card(s) appear with `cost_period: quarter | month | both`.
 
-Billing-cycle dates control the day-count used by the estimate:
+Each card shows the **cost so far** in the current billing period: it counts the
+days from the period start (`month_start_day` / `quarter_start_date`) up to and
+including today, and uses that elapsed day-count for both the connection fee and
+the power-projected estimate. For example, with `month_start_day: 2`, on the 3rd
+the card covers 2 days.
+
+Billing-cycle dates control where each period starts:
 
 ```yaml
 cost_period: both
@@ -179,10 +185,11 @@ computes `import_kWh × import_tariff − export_kWh × export_tariff`.
 
 Most grid connections carry a fixed daily supply charge regardless of usage. Set
 `daily_connection_fee` (in $/day) and it's added to every cost card as
-`fee × days in the period` — on both the estimated and accurate figures:
+`fee × days elapsed so far this period` — on both the estimated and accurate
+figures:
 
 ```yaml
-daily_connection_fee: 0.98   # → adds ≈ $89 to a 91-day quarter card
+daily_connection_fee: 0.98   # → on day 30 of the quarter, adds 30 × $0.98 ≈ $29
 ```
 
 Leave it at `0` (the default) to keep cost cards usage-only.
@@ -430,8 +437,9 @@ The **Quarter Cost** card shows one of two things:
 
 2. **`ESTIMATE` (rough)** — when no energy sensors are configured. The card can
    only see **instantaneous power** (W), so it projects the *current* grid
-   import/export over the whole quarter. **This is deliberately crude** and will
-   swing wildly as power changes — it is intended as a rough indicator only.
+   import/export over the **days elapsed so far this period** (from the period
+   start date to today). **This is deliberately crude** and will swing wildly as
+   power changes — it is intended as a rough indicator only.
 
 **Why energy sensors are far better:** instantaneous power tells you nothing
 about how long you imported/exported. A `utility_meter` or your integration's

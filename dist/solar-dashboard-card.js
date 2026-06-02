@@ -961,6 +961,46 @@ class SolarDashboardCard extends HTMLElement {
     return period === "month" ? 30 : Number(this._config.quarter_days) || 91;
   }
 
+  /** Start date (local midnight) of the current billing period. */
+  _periodStart(period) {
+    const now = new Date();
+    if (period === "month") {
+      let d = parseInt(this._config.month_start_day, 10);
+      if (!Number.isFinite(d) || d < 1) d = 1;
+      if (d > 31) d = 31;
+      let start = new Date(now.getFullYear(), now.getMonth(), d);
+      if (now.getDate() < d)
+        start = new Date(now.getFullYear(), now.getMonth() - 1, d);
+      return start;
+    }
+    // quarter
+    const a = this._quarterAnchor();
+    let start = new Date(now.getFullYear() - 1, a.month, a.day);
+    for (let i = 0; i < 12; i++) {
+      const next = new Date(start.getFullYear(), start.getMonth() + 3, a.day);
+      if (now >= start && now < next) return start;
+      start = next;
+    }
+    return start;
+  }
+
+  /**
+   * Days elapsed from the period start up to and including today — used for
+   * "cost so far". E.g. month_start_day 2 and today the 3rd → 2 days. Always
+   * at least 1 and never more than the full period length.
+   */
+  _periodElapsedDays(period) {
+    try {
+      const now = new Date();
+      const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+      const start = this._periodStart(period);
+      const elapsed = Math.round((today - start) / 86400000) + 1;
+      return Math.min(this._periodDays(period), Math.max(1, elapsed));
+    } catch (e) {
+      return 1;
+    }
+  }
+
   _energySensorsFor(period) {
     const C = this._config;
     if (period === "month") {
@@ -985,7 +1025,8 @@ class SolarDashboardCard extends HTMLElement {
     const impTariff = Number(C.import_tariff);
     const expTariff = Number(C.export_tariff);
     const dailyFee = Number(C.daily_connection_fee) || 0;
-    const days = this._periodDays(period);
+    // Days so far in the current billing period (start day → today, inclusive).
+    const days = this._periodElapsedDays(period);
     const connection = dailyFee * days;
     const feeNote = dailyFee
       ? ` · Supply ${days}d @ $${dailyFee}/day = ${this._fmtMoney(connection)}`
@@ -1017,7 +1058,7 @@ class SolarDashboardCard extends HTMLElement {
       els.tag.textContent = "ESTIMATE";
       els.tag.className = "sdc-cost-tag";
       els.value.textContent = this._fmtMoney(cost);
-      els.foot.textContent = `Rough projection of current power over ~${days} days${feeNote}. Configure ${period} energy sensors (kWh) for accuracy.`;
+      els.foot.textContent = `Rough projection of current power over the ${days} days so far this ${period}${feeNote}. Configure ${period} energy sensors (kWh) for accuracy.`;
     }
   }
 
