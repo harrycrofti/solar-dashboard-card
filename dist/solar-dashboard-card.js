@@ -80,6 +80,7 @@ const DEFAULTS = {
   // Tariffs / cost estimate
   import_tariff: 0.24,
   export_tariff: 0.4,
+  daily_connection_fee: 0, // $/day fixed grid supply charge (added to every period)
   cost_period: "quarter", // "quarter" | "month" | "both"
   month_start_day: 1, // day-of-month the billing month starts (1-31)
   quarter_start_date: "", // anchor "YYYY-MM-DD" or "MM-DD"; blank = Jan 1
@@ -983,13 +984,20 @@ class SolarDashboardCard extends HTMLElement {
     const C = this._config;
     const impTariff = Number(C.import_tariff);
     const expTariff = Number(C.export_tariff);
+    const dailyFee = Number(C.daily_connection_fee) || 0;
+    const days = this._periodDays(period);
+    const connection = dailyFee * days;
+    const feeNote = dailyFee
+      ? ` · Supply ${days}d @ $${dailyFee}/day = ${this._fmtMoney(connection)}`
+      : "";
     const [impSensor, expSensor] = this._energySensorsFor(period);
     const impKwh = impSensor ? this._energyKwh(impSensor) : null;
     const expKwh = expSensor ? this._energyKwh(expSensor) : null;
 
     if (impKwh !== null || expKwh !== null) {
       // Accurate: from real energy totals (utility_meter etc.).
-      const cost = (impKwh || 0) * impTariff - (expKwh || 0) * expTariff;
+      const cost =
+        (impKwh || 0) * impTariff - (expKwh || 0) * expTariff + connection;
       els.tag.textContent = "FROM ENERGY";
       els.tag.className = "sdc-cost-tag actual";
       els.value.textContent = this._fmtMoney(cost);
@@ -997,18 +1005,19 @@ class SolarDashboardCard extends HTMLElement {
         1
       )} kWh @ $${impTariff} · Export ${(expKwh || 0).toFixed(
         1
-      )} kWh @ $${expTariff}`;
+      )} kWh @ $${expTariff}${feeNote}`;
     } else {
       // Rough projection from instantaneous power (clearly flagged).
-      const days = this._periodDays(period);
       const impKw = importW !== null ? Math.max(0, importW) / 1000 : 0;
       const expKw = exportW !== null ? Math.max(0, exportW) / 1000 : 0;
       const cost =
-        impKw * 24 * days * impTariff - expKw * 24 * days * expTariff;
+        impKw * 24 * days * impTariff -
+        expKw * 24 * days * expTariff +
+        connection;
       els.tag.textContent = "ESTIMATE";
       els.tag.className = "sdc-cost-tag";
       els.value.textContent = this._fmtMoney(cost);
-      els.foot.textContent = `Rough projection of current power over ~${days} days. Configure ${period} energy sensors (kWh) for accuracy.`;
+      els.foot.textContent = `Rough projection of current power over ~${days} days${feeNote}. Configure ${period} energy sensors (kWh) for accuracy.`;
     }
   }
 
@@ -1942,6 +1951,7 @@ const ENTITY_SECTIONS = [
 const NUMBER_FIELDS = [
   ["import_tariff", "Import tariff ($/kWh)", 0.01],
   ["export_tariff", "Export tariff ($/kWh)", 0.01],
+  ["daily_connection_fee", "Daily connection fee ($/day)", 0.01],
   ["quarter_days", "Days in quarter", 1],
   ["poll_interval", "Poll interval (s)", 1],
   ["graph_poll_interval", "Graph refresh (s)", 10],

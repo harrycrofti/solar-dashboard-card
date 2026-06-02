@@ -175,6 +175,18 @@ export_energy_quarter_sensor: sensor.grid_export_energy_quarter
 Each card independently switches from **`ESTIMATE`** to **`FROM ENERGY`** and
 computes `import_kWh × import_tariff − export_kWh × export_tariff`.
 
+### Daily connection fee
+
+Most grid connections carry a fixed daily supply charge regardless of usage. Set
+`daily_connection_fee` (in $/day) and it's added to every cost card as
+`fee × days in the period` — on both the estimated and accurate figures:
+
+```yaml
+daily_connection_fee: 0.98   # → adds ≈ $89 to a 91-day quarter card
+```
+
+Leave it at `0` (the default) to keep cost cards usage-only.
+
 ---
 
 ## Statistics & graphs
@@ -237,6 +249,7 @@ to hide the section entirely, or `graphs_collapsed: true` to start it folded.
 | `details_overlay_boolean` | entity | `input_boolean.energy_vision_details` | When `on`, shows the extended details grid. |
 | `import_tariff` | number | `0.24` | $ per kWh imported. |
 | `export_tariff` | number | `0.40` | $ per kWh exported (feed-in). |
+| `daily_connection_fee` | number | `0` | Fixed grid supply charge in $ per day. Added to every cost card as `fee × days in the period` (applies to both the accurate and estimated figures). |
 | `cost_period` | string | `quarter` | Which cost card(s) to show: `quarter`, `month`, or `both`. |
 | `month_start_day` | number | `1` | Day of month the billing month starts (used for the monthly day-count). |
 | `quarter_start_date` | string | _(Jan 1)_ | Quarter anchor as `YYYY-MM-DD` or `MM-DD`; quarters repeat every 3 months from it. |
@@ -412,7 +425,8 @@ The **Quarter Cost** card shows one of two things:
 
 1. **`FROM ENERGY` (accurate)** — when you configure `import_energy_sensor` and/or
    `export_energy_sensor` (kWh totals for the quarter). Cost is computed as
-   `import_kWh × import_tariff − export_kWh × export_tariff`.
+   `import_kWh × import_tariff − export_kWh × export_tariff` (plus
+   `daily_connection_fee × days` if set).
 
 2. **`ESTIMATE` (rough)** — when no energy sensors are configured. The card can
    only see **instantaneous power** (W), so it projects the *current* grid

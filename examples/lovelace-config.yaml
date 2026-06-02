@@ -35,6 +35,7 @@ details_overlay_boolean: input_boolean.energy_vision_details    # on = show deta
 # --- Cost cards -------------------------------------------------------------
 import_tariff: 0.24
 export_tariff: 0.40
+daily_connection_fee: 0.98     # $/day fixed grid supply charge (× days in the period)
 cost_period: both              # quarter | month | both
 month_start_day: 1             # billing month starts on this day
 quarter_start_date: 2026-07-01 # quarter anchor (YYYY-MM-DD or MM-DD); blank = Jan 1
