@@ -131,30 +131,48 @@ autocomplete), tariffs/behaviour, node positions and image paths.
 
 ---
 
-## Accurate quarterly cost (`utility_meter`)
+## Cost cards — monthly / quarterly + billing dates
 
-By default the cost card is an **estimate**. To make it accurate, give it real
-kWh totals that reset each quarter. A ready-to-use package is provided in
+Choose which cost card(s) appear with `cost_period: quarter | month | both`.
+
+Billing-cycle dates control the day-count used by the estimate:
+
+```yaml
+cost_period: both
+month_start_day: 1            # billing month starts on the 1st
+quarter_start_date: 2026-07-01  # quarters anchored to an AU financial-year start
+```
+
+### Accurate cost (`utility_meter`)
+
+By default the cost card is an **estimate** projected from instantaneous power.
+To make it accurate, give it real kWh totals that reset on the right cycle. A
+ready-to-use package is in
 [`examples/energy-meters.yaml`](examples/energy-meters.yaml). In short:
 
 - **If you only have power (W) sensors** (the GoodWe defaults): add an
-  `integration` (Riemann-sum) sensor to convert W→kWh, then a `utility_meter`
-  with `cycle: quarterly`.
+  `integration` (Riemann-sum) sensor to convert W→kWh, then `utility_meter`
+  helpers with `cycle: monthly` and/or `cycle: quarterly`.
 - **If you already have cumulative kWh sensors**: skip the integration step and
   point `utility_meter` straight at them.
+- To shift the reset off the 1st, use the utility_meter `offset` option.
 
 You can also create both from the UI: **Settings → Devices & Services → Helpers
 → "Integration - Riemann sum"** and **"Utility Meter"** (no restart needed).
 
-Then set:
+Then point the matching period at them:
 
 ```yaml
-import_energy_sensor: sensor.grid_import_energy_quarter
-export_energy_sensor: sensor.grid_export_energy_quarter
+# monthly card
+import_energy_month_sensor: sensor.grid_import_energy_month
+export_energy_month_sensor: sensor.grid_export_energy_month
+# quarterly card
+import_energy_quarter_sensor: sensor.grid_import_energy_quarter
+export_energy_quarter_sensor: sensor.grid_export_energy_quarter
 ```
 
-The cost card switches from **`ESTIMATE`** to **`FROM ENERGY`** and computes
-`import_kWh × import_tariff − export_kWh × export_tariff`.
+Each card independently switches from **`ESTIMATE`** to **`FROM ENERGY`** and
+computes `import_kWh × import_tariff − export_kWh × export_tariff`.
 
 ---
 
@@ -179,14 +197,19 @@ The cost card switches from **`ESTIMATE`** to **`FROM ENERGY`** and computes
 | `details_overlay_boolean` | entity | `input_boolean.energy_vision_details` | When `on`, shows the extended details grid. |
 | `import_tariff` | number | `0.24` | $ per kWh imported. |
 | `export_tariff` | number | `0.40` | $ per kWh exported (feed-in). |
-| `quarter_days` | number | `91` | Days in the quarter (used for the rough projection only). |
-| `import_energy_sensor` | entity | _(none)_ | Optional kWh import total → enables **accurate** cost. |
-| `export_energy_sensor` | entity | _(none)_ | Optional kWh export total → enables **accurate** cost. |
+| `cost_period` | string | `quarter` | Which cost card(s) to show: `quarter`, `month`, or `both`. |
+| `month_start_day` | number | `1` | Day of month the billing month starts (used for the monthly day-count). |
+| `quarter_start_date` | string | _(Jan 1)_ | Quarter anchor as `YYYY-MM-DD` or `MM-DD`; quarters repeat every 3 months from it. |
+| `quarter_days` | number | `91` | Legacy fallback if the quarter anchor can't be computed. |
+| `import_energy_month_sensor` / `export_energy_month_sensor` | entity | _(none)_ | Optional kWh totals (monthly cycle) → **accurate** monthly cost. |
+| `import_energy_quarter_sensor` / `export_energy_quarter_sensor` | entity | _(none)_ | Optional kWh totals (quarterly cycle) → **accurate** quarter cost. |
+| `import_energy_sensor` / `export_energy_sensor` | entity | _(none)_ | Legacy aliases — used as the quarter sensors if the `*_quarter_*` keys are unset. |
 | `poll_interval` | number | `10` | Refresh interval in seconds. |
 | `use_rest` | bool | `false` | Also poll `/api/states` via `hass.callApi` (usually unnecessary; `hass.states` is preferred). |
 | `solar_label` | string | `Solar` | Label for the solar node. |
 | `flow_power_color` | colour | `#21e065` | Colour of the moving flow dots for generation/supply (green). |
 | `flow_consumption_color` | colour | `#ffc233` | Colour of the moving flow dots for grid consumption (amber). |
+| `flow_battery_grid_color` | colour | `#7c5cff` | Colour for grid↔battery flows (charging **from** the grid and exporting **to** the grid). |
 | `icons` | map | _(mdi defaults)_ | Override node icons: `solar`, `home`, `battery`, `grid` (any `mdi:` icon). Battery icon auto-tracks level/charging. |
 | `images` | map | _(see below)_ | Image paths per weather/day-night key. |
 | `nodes` | map | _(see below)_ | Node positions in percentages. |
@@ -242,15 +265,23 @@ image. The flow lines re-route automatically to match.
 
 ## Energy flow logic
 
-- **Battery → Home** active when `battery_discharge_sensor` > 0.
-- **Solar → Battery** active when `battery_charge_sensor` > 0.
-- **Grid → Home** active when grid import power > 0.
-- **Solar → Grid** active when grid export power > 0.
-- **Solar → Home** active when solar generation > 0 **and** home load > 0.
+With `surplus = max(0, solar − load)`:
+
+- **Solar → Home** (green) — solar generation > 0 and home load > 0.
+- **Solar → Battery** (green) — charging and there is solar `surplus`.
+- **Solar → Grid** (green) — exporting and there is solar `surplus`.
+- **Battery → Home** (green) — discharging and `surplus` < load.
+- **Grid → Home** (amber) — importing and `solar + discharge` < load.
+- **Grid → Battery** (violet) — charging, grid importing, and `solar < load + charge`
+  (i.e. the grid is topping up the battery).
+- **Battery → Grid** (violet) — discharging, exporting, and `surplus < export`
+  (i.e. the battery is feeding the grid).
 - Inactive lines stay visible but dim.
 
-Power values are normalised to Watts using each entity's
-`unit_of_measurement`, so kW/W sensors both work.
+> These are heuristics based on an energy balance — exact source attribution is
+> impossible without directional sub-metering, but they give the right picture
+> for normal operation. Power values are normalised to Watts using each
+> entity's `unit_of_measurement`, so kW/W sensors both work.
 
 ---
 

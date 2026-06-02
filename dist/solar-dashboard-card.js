@@ -10,7 +10,7 @@
  * License: MIT
  */
 
-const CARD_VERSION = "1.1.0";
+const CARD_VERSION = "1.2.0";
 
 /* eslint-disable no-console */
 console.info(
@@ -80,17 +80,27 @@ const DEFAULTS = {
   // Tariffs / cost estimate
   import_tariff: 0.24,
   export_tariff: 0.4,
-  quarter_days: 91,
-  import_energy_sensor: undefined, // optional kWh total for the quarter
-  export_energy_sensor: undefined, // optional kWh total for the quarter
+  cost_period: "quarter", // "quarter" | "month" | "both"
+  month_start_day: 1, // day-of-month the billing month starts (1-31)
+  quarter_start_date: "", // anchor "YYYY-MM-DD" or "MM-DD"; blank = Jan 1
+  quarter_days: 91, // legacy fallback if the quarter anchor can't be computed
+  // Optional kWh totals for accurate cost (utility_meter sensors).
+  import_energy_month_sensor: undefined,
+  export_energy_month_sensor: undefined,
+  import_energy_quarter_sensor: undefined,
+  export_energy_quarter_sensor: undefined,
+  // Legacy aliases — used as the quarter sensors if the *_quarter_* keys are unset.
+  import_energy_sensor: undefined,
+  export_energy_sensor: undefined,
 
   // Behaviour
   poll_interval: 10, // seconds
   use_rest: false, // optional /api/states REST polling
 
-  // Appearance — flow-dot colours (green = generation/supply, amber = grid draw)
-  flow_power_color: "#21e065",
-  flow_consumption_color: "#ffc233",
+  // Appearance — flow-dot colours
+  flow_power_color: "#21e065", // green: generation / supply
+  flow_consumption_color: "#ffc233", // amber: grid draw to home
+  flow_battery_grid_color: "#7c5cff", // violet: grid<->battery (charge from / export to grid)
 
   // Images (all must use /local/, never Windows paths)
   images: {
@@ -454,25 +464,46 @@ class SolarDashboardCard extends HTMLElement {
 
   _build() {
     const n = this._config.nodes;
-    // kind: "power" (green, generation/supply) or "consume" (amber, grid draw)
+    // kind: "power" (green supply), "consume" (amber grid draw),
+    //       "battgrid" (violet grid<->battery: charge from grid / export to grid)
     const flows = [
       { id: "solar-home", from: n.solar, to: n.home, kind: "power" },
       { id: "solar-battery", from: n.solar, to: n.battery, kind: "power" },
       { id: "solar-grid", from: n.solar, to: n.grid, kind: "power" },
       { id: "battery-home", from: n.battery, to: n.home, kind: "power" },
       { id: "grid-home", from: n.grid, to: n.home, kind: "consume" },
+      { id: "grid-battery", from: n.grid, to: n.battery, kind: "battgrid" },
+      { id: "battery-grid", from: n.battery, to: n.grid, kind: "battgrid" },
     ];
 
-    // Each connection = a dim static track + an animated moving-dot overlay.
-    const flowPaths = flows
+    // Static dim tracks (deduped per segment so overlapping pairs don't double up).
+    const seen = new Set();
+    const trackPaths = flows
       .map((f) => {
-        const d = this._line(f.from, f.to);
-        return (
-          `<path class="sdc-track" d="${d}" vector-effect="non-scaling-stroke" />` +
-          `<path id="flow-${f.id}" class="sdc-flow ${f.kind}" d="${d}" vector-effect="non-scaling-stroke" />`
-        );
+        const key = [`${f.from.x},${f.from.y}`, `${f.to.x},${f.to.y}`]
+          .sort()
+          .join("|");
+        if (seen.has(key)) return "";
+        seen.add(key);
+        return `<path class="sdc-track" d="${this._line(
+          f.from,
+          f.to
+        )}" vector-effect="non-scaling-stroke" />`;
       })
       .join("");
+
+    // Animated moving-dot overlays (one per flow, on top of the tracks).
+    const overlayPaths = flows
+      .map(
+        (f) =>
+          `<path id="flow-${f.id}" class="sdc-flow ${f.kind}" d="${this._line(
+            f.from,
+            f.to
+          )}" vector-effect="non-scaling-stroke" />`
+      )
+      .join("");
+
+    const flowPaths = trackPaths + overlayPaths;
 
     const ic = this._config.icons || {};
     const icons = {
@@ -494,6 +525,30 @@ class SolarDashboardCard extends HTMLElement {
           <span class="sdc-node-value" id="val-${id}">—</span>
         </span>
       </button>`;
+
+    // Which cost period card(s) to render.
+    const cp = String(this._config.cost_period || "quarter").toLowerCase();
+    const periods =
+      cp === "both"
+        ? ["month", "quarter"]
+        : cp === "month"
+        ? ["month"]
+        : ["quarter"];
+    this._costPeriods = periods;
+    const periodLabel = { month: "Monthly Cost", quarter: "Quarter Cost" };
+    const costPanels = periods
+      .map(
+        (p) => `
+          <div class="sdc-panel sdc-cost-card">
+            <div class="sdc-panel-head">
+              <span>${periodLabel[p]}</span>
+              <span class="sdc-cost-tag" id="cost-tag-${p}">ESTIMATE</span>
+            </div>
+            <div class="sdc-cost-value" id="cost-value-${p}">—</div>
+            <div class="sdc-panel-foot" id="cost-foot-${p}"></div>
+          </div>`
+      )
+      .join("");
 
     const title = this._config.title
       ? `<div class="sdc-title">${this._config.title}</div>`
@@ -532,14 +587,7 @@ class SolarDashboardCard extends HTMLElement {
             <div class="sdc-panel-foot" id="batt-health"></div>
           </div>
 
-          <div class="sdc-panel sdc-cost-card">
-            <div class="sdc-panel-head">
-              <span>Quarter Cost</span>
-              <span class="sdc-cost-tag" id="cost-tag">ESTIMATE</span>
-            </div>
-            <div class="sdc-cost-value" id="cost-value">—</div>
-            <div class="sdc-panel-foot" id="cost-foot"></div>
-          </div>
+          ${costPanels}
         </div>
 
         <div class="sdc-details" id="details" hidden></div>
@@ -566,13 +614,19 @@ class SolarDashboardCard extends HTMLElement {
       battPct: $("batt-pct"),
       battBar: $("batt-bar"),
       battHealth: $("batt-health"),
-      costTag: $("cost-tag"),
-      costValue: $("cost-value"),
-      costFoot: $("cost-foot"),
       details: $("details"),
     };
     flows.forEach((f) => {
       this._els.flows[f.id] = $(`flow-${f.id}`);
+    });
+    // per-period cost card refs
+    this._costEls = {};
+    periods.forEach((p) => {
+      this._costEls[p] = {
+        tag: $(`cost-tag-${p}`),
+        value: $(`cost-value-${p}`),
+        foot: $(`cost-foot-${p}`),
+      };
     });
 
     // node clicks -> more-info
@@ -631,17 +685,32 @@ class SolarDashboardCard extends HTMLElement {
     }
 
     // ---- flow activity ----
-    const solarToBattery = (chargeW || 0) > 0;
-    const batteryToHome = (dischargeW || 0) > 0;
-    const gridToHome = (importW || 0) > 0;
-    const solarToGrid = (exportW || 0) > 0;
-    const solarToHome = (solarW || 0) > 0 && (loadW || 0) > 0;
+    // Safe numerics + a simple energy-balance attribution. Exact attribution is
+    // impossible without directional sensors, so these are sensible heuristics.
+    const s = solarW || 0;
+    const l = loadW || 0;
+    const ch = chargeW || 0;
+    const dis = dischargeW || 0;
+    const imp = importW || 0;
+    const exp = exportW || 0;
+    const surplus = Math.max(0, s - l); // solar left after the house load
+
+    const isCharging = ch > 0;
+    const isDischarging = dis > 0;
+
+    const solarToHome = s > 0 && l > 0;
+    const solarToBattery = isCharging && surplus > 0; // charged by solar surplus
+    const gridToBattery = isCharging && imp > 0 && s < l + ch; // charged by grid
+    const solarToGrid = exp > 0 && surplus > 0; // exporting solar surplus
+    const batteryToGrid = isDischarging && exp > 0 && surplus < exp; // battery exports
+    const gridToHome = imp > 0 && s + dis < l; // grid covers remaining load
+    const batteryToHome = isDischarging && l > 0 && surplus < l; // battery covers load
 
     // battery node icon reflects level + charging
     if (this._els.battIcon) {
       this._els.battIcon.setAttribute(
         "icon",
-        this._batteryIcon(soc, solarToBattery)
+        this._batteryIcon(soc, isCharging)
       );
     }
 
@@ -650,37 +719,41 @@ class SolarDashboardCard extends HTMLElement {
     this._setFlow("solar-grid", solarToGrid);
     this._setFlow("battery-home", batteryToHome);
     this._setFlow("grid-home", gridToHome);
+    this._setFlow("grid-battery", gridToBattery);
+    this._setFlow("battery-grid", batteryToGrid);
 
     // solar node "active" glow
     this.shadowRoot
       .querySelector(".sdc-node-solar")
-      ?.classList.toggle("active", (solarW || 0) > 0);
+      ?.classList.toggle("active", s > 0);
     this.shadowRoot
       .querySelector(".sdc-node-battery")
-      ?.classList.toggle("active", solarToBattery || batteryToHome);
+      ?.classList.toggle("active", isCharging || isDischarging);
     this.shadowRoot
       .querySelector(".sdc-node-grid")
-      ?.classList.toggle("active", gridToHome || solarToGrid);
+      ?.classList.toggle("active", imp > 0 || exp > 0);
     this.shadowRoot
       .querySelector(".sdc-node-home")
-      ?.classList.toggle("active", (loadW || 0) > 0);
+      ?.classList.toggle("active", l > 0);
 
     // ---- stats strip ----
     this._els.stSolar.textContent = this._fmtPower(solarW);
     this._els.stBatt.textContent = this._fmtPercent(soc);
-    const imp = importW !== null && importW > 0 ? this._fmtPower(importW) : "0 W";
-    const exp = exportW !== null && exportW > 0 ? this._fmtPower(exportW) : "0 W";
-    this._els.stGrid.innerHTML = `<span class="sdc-imp">↓${imp}</span> <span class="sdc-exp">↑${exp}</span>`;
+    const impStr =
+      importW !== null && importW > 0 ? this._fmtPower(importW) : "0 W";
+    const expStr =
+      exportW !== null && exportW > 0 ? this._fmtPower(exportW) : "0 W";
+    this._els.stGrid.innerHTML = `<span class="sdc-imp">↓${impStr}</span> <span class="sdc-exp">↑${expStr}</span>`;
     this._els.stHome.textContent = this._fmtPower(loadW);
 
     // ---- battery card ----
     let status = "Idle";
     let statusCls = "idle";
-    if (batteryToHome) {
+    if (isDischarging) {
       status = "Discharging";
       statusCls = "discharging";
-    } else if (solarToBattery) {
-      status = "Charging";
+    } else if (isCharging) {
+      status = gridToBattery ? "Charging (grid)" : "Charging";
       statusCls = "charging";
     }
     this._els.battStatus.textContent = status;
@@ -699,41 +772,96 @@ class SolarDashboardCard extends HTMLElement {
     this._updateDetails();
   }
 
+  _quarterAnchor() {
+    const v = this._config.quarter_start_date;
+    if (v) {
+      const p = String(v).split("-").map((x) => parseInt(x, 10));
+      if (p.length >= 3 && p.every(Number.isFinite))
+        return { month: p[1] - 1, day: p[2] };
+      if (p.length === 2 && p.every(Number.isFinite))
+        return { month: p[0] - 1, day: p[1] };
+    }
+    return { month: 0, day: 1 }; // Jan 1
+  }
+
+  /** Number of days in the current billing period (month or quarter). */
+  _periodDays(period) {
+    try {
+      const now = new Date();
+      if (period === "month") {
+        let d = parseInt(this._config.month_start_day, 10);
+        if (!Number.isFinite(d) || d < 1) d = 1;
+        if (d > 31) d = 31;
+        let start = new Date(now.getFullYear(), now.getMonth(), d);
+        if (now.getDate() < d)
+          start = new Date(now.getFullYear(), now.getMonth() - 1, d);
+        const end = new Date(start.getFullYear(), start.getMonth() + 1, d);
+        return Math.max(1, Math.round((end - start) / 86400000));
+      }
+      // quarter
+      const a = this._quarterAnchor();
+      let start = new Date(now.getFullYear() - 1, a.month, a.day);
+      for (let i = 0; i < 12; i++) {
+        const next = new Date(start.getFullYear(), start.getMonth() + 3, a.day);
+        if (now >= start && now < next)
+          return Math.max(1, Math.round((next - start) / 86400000));
+        start = next;
+      }
+    } catch (e) {
+      /* fall through */
+    }
+    return period === "month" ? 30 : Number(this._config.quarter_days) || 91;
+  }
+
+  _energySensorsFor(period) {
+    const C = this._config;
+    if (period === "month") {
+      return [C.import_energy_month_sensor, C.export_energy_month_sensor];
+    }
+    return [
+      C.import_energy_quarter_sensor || C.import_energy_sensor,
+      C.export_energy_quarter_sensor || C.export_energy_sensor,
+    ];
+  }
+
   _updateCost(importW, exportW) {
+    (this._costPeriods || ["quarter"]).forEach((p) =>
+      this._updateCostPeriod(p, importW, exportW)
+    );
+  }
+
+  _updateCostPeriod(period, importW, exportW) {
+    const els = this._costEls && this._costEls[period];
+    if (!els) return;
     const C = this._config;
     const impTariff = Number(C.import_tariff);
     const expTariff = Number(C.export_tariff);
-    const impKwh = C.import_energy_sensor
-      ? this._energyKwh(C.import_energy_sensor)
-      : null;
-    const expKwh = C.export_energy_sensor
-      ? this._energyKwh(C.export_energy_sensor)
-      : null;
+    const [impSensor, expSensor] = this._energySensorsFor(period);
+    const impKwh = impSensor ? this._energyKwh(impSensor) : null;
+    const expKwh = expSensor ? this._energyKwh(expSensor) : null;
 
     if (impKwh !== null || expKwh !== null) {
-      // Accurate: from real energy totals.
+      // Accurate: from real energy totals (utility_meter etc.).
       const cost = (impKwh || 0) * impTariff - (expKwh || 0) * expTariff;
-      this._els.costTag.textContent = "FROM ENERGY";
-      this._els.costTag.className = "sdc-cost-tag actual";
-      this._els.costValue.textContent = this._fmtMoney(cost);
-      this._els.costFoot.textContent = `Import ${(impKwh || 0).toFixed(
+      els.tag.textContent = "FROM ENERGY";
+      els.tag.className = "sdc-cost-tag actual";
+      els.value.textContent = this._fmtMoney(cost);
+      els.foot.textContent = `Import ${(impKwh || 0).toFixed(
         1
       )} kWh @ $${impTariff} · Export ${(expKwh || 0).toFixed(
         1
       )} kWh @ $${expTariff}`;
     } else {
       // Rough projection from instantaneous power (clearly flagged).
-      const days = Number(C.quarter_days) || 91;
+      const days = this._periodDays(period);
       const impKw = importW !== null ? Math.max(0, importW) / 1000 : 0;
       const expKw = exportW !== null ? Math.max(0, exportW) / 1000 : 0;
-      const projImp = impKw * 24 * days;
-      const projExp = expKw * 24 * days;
-      const cost = projImp * impTariff - projExp * expTariff;
-      this._els.costTag.textContent = "ESTIMATE";
-      this._els.costTag.className = "sdc-cost-tag";
-      this._els.costValue.textContent = this._fmtMoney(cost);
-      this._els.costFoot.textContent =
-        "Rough projection of current power over the quarter. Configure import_energy_sensor / export_energy_sensor (kWh) for an accurate figure.";
+      const cost =
+        impKw * 24 * days * impTariff - expKw * 24 * days * expTariff;
+      els.tag.textContent = "ESTIMATE";
+      els.tag.className = "sdc-cost-tag";
+      els.value.textContent = this._fmtMoney(cost);
+      els.foot.textContent = `Rough projection of current power over ~${days} days. Configure ${period} energy sensors (kWh) for accuracy.`;
     }
   }
 
@@ -799,6 +927,7 @@ class SolarDashboardCard extends HTMLElement {
   _styles() {
     const powerColor = this._config.flow_power_color || "#21e065";
     const consumeColor = this._config.flow_consumption_color || "#ffc233";
+    const battgridColor = this._config.flow_battery_grid_color || "#7c5cff";
     return `
       :host { display:block; }
       ha-card {
@@ -807,6 +936,7 @@ class SolarDashboardCard extends HTMLElement {
         --sdc-muted: var(--secondary-text-color, #9aa0a6);
         --sdc-flow-power: ${powerColor};
         --sdc-flow-consume: ${consumeColor};
+        --sdc-flow-battgrid: ${battgridColor};
         --sdc-solar: #f5c542;
         --sdc-grid: #ff5d5d;
         --sdc-battery: #38d39f;
@@ -872,6 +1002,10 @@ class SolarDashboardCard extends HTMLElement {
       .sdc-flow.consume.active {
         stroke: var(--sdc-flow-consume);
         filter: drop-shadow(0 0 4px var(--sdc-flow-consume));
+      }
+      .sdc-flow.battgrid.active {
+        stroke: var(--sdc-flow-battgrid);
+        filter: drop-shadow(0 0 4px var(--sdc-flow-battgrid));
       }
       @keyframes sdc-flow-move { to { stroke-dashoffset: -13.1; } }
 
@@ -977,7 +1111,7 @@ class SolarDashboardCard extends HTMLElement {
       /* Cards */
       .sdc-cards {
         display:grid;
-        grid-template-columns: 1fr 1fr;
+        grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
         gap:10px;
         padding:12px;
       }
@@ -1116,8 +1250,10 @@ const ENTITY_SECTIONS = [
   {
     title: "Cost — optional energy sensors (kWh) for accurate figures",
     fields: [
-      ["import_energy_sensor", "Import energy (kWh)"],
-      ["export_energy_sensor", "Export energy (kWh)"],
+      ["import_energy_month_sensor", "Import energy — month (kWh)"],
+      ["export_energy_month_sensor", "Export energy — month (kWh)"],
+      ["import_energy_quarter_sensor", "Import energy — quarter (kWh)"],
+      ["export_energy_quarter_sensor", "Export energy — quarter (kWh)"],
     ],
   },
 ];
@@ -1234,6 +1370,29 @@ class SolarDashboardCardEditor extends HTMLElement {
                value="${this._config[key] ?? ""}" placeholder="${d[key]}" />
       </label>`;
 
+    const textInput = (key, label, placeholder) => `
+      <label class="sdc-f">
+        <span>${label}</span>
+        <input type="text" data-text="${key}" value="${
+      this._config[key] ?? ""
+    }" placeholder="${placeholder}" />
+      </label>`;
+
+    const selectInput = (key, label, options) => `
+      <label class="sdc-f">
+        <span>${label}</span>
+        <select data-select="${key}">
+          ${options
+            .map(
+              (o) =>
+                `<option value="${o}" ${
+                  (this._config[key] || d[key]) === o ? "selected" : ""
+                }>${o}</option>`
+            )
+            .join("")}
+        </select>
+      </label>`;
+
     const sections = ENTITY_SECTIONS.map(
       (s) => `
       <div class="sdc-sec">
@@ -1276,12 +1435,27 @@ class SolarDashboardCardEditor extends HTMLElement {
     }" />
       </label>`;
 
+    const costPeriod = `
+      <div class="sdc-sec">
+        <div class="sdc-sec-h">Cost period</div>
+        <div class="sdc-grid">
+          ${selectInput("cost_period", "Show", ["quarter", "month", "both"])}
+          ${numberInput("month_start_day", "Month start day (1-31)", 1)}
+          ${textInput(
+            "quarter_start_date",
+            "Quarter start (YYYY-MM-DD or MM-DD)",
+            "01-01"
+          )}
+        </div>
+      </div>`;
+
     const appearance = `
       <div class="sdc-sec">
         <div class="sdc-sec-h">Flow colours</div>
         <div class="sdc-grid">
           ${colorInput("flow_power_color", "Power / generation (green)")}
           ${colorInput("flow_consumption_color", "Grid consumption (amber)")}
+          ${colorInput("flow_battery_grid_color", "Grid ↔ battery (violet)")}
         </div>
       </div>`;
 
@@ -1334,7 +1508,7 @@ class SolarDashboardCardEditor extends HTMLElement {
         @media (max-width: 480px) { .sdc-grid { grid-template-columns: 1fr; } }
         .sdc-f { display:flex; flex-direction:column; gap:3px; font-size:0.8rem; }
         .sdc-f > span { color: var(--secondary-text-color, #9aa0a6); }
-        .sdc-f input[type=text], .sdc-f input[type=number] {
+        .sdc-f input[type=text], .sdc-f input[type=number], .sdc-f select {
           background: var(--secondary-background-color, #1c1f26);
           color: var(--primary-text-color, #e1e1e1);
           border:1px solid var(--divider-color, rgba(255,255,255,0.12));
@@ -1363,6 +1537,7 @@ class SolarDashboardCardEditor extends HTMLElement {
       <div class="sdc-note">Leave a field blank to use its built-in default (shown as placeholder).</div>
       ${sections}
       ${numbers}
+      ${costPeriod}
       ${appearance}
       ${nodes}
       ${images}
@@ -1416,6 +1591,11 @@ class SolarDashboardCardEditor extends HTMLElement {
     root.querySelectorAll("input[data-color]").forEach((el) =>
       el.addEventListener("change", (e) =>
         this._set(e.target.dataset.color, e.target.value)
+      )
+    );
+    root.querySelectorAll("select[data-select]").forEach((el) =>
+      el.addEventListener("change", (e) =>
+        this._set(e.target.dataset.select, e.target.value)
       )
     );
   }

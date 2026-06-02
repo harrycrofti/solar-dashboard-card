@@ -32,13 +32,23 @@ sunset_sensor: sensor.raceview_astronomical_sunset_time_0
 day_cycle_boolean: input_boolean.energy_house_image_day_cycle   # off = always day image
 details_overlay_boolean: input_boolean.energy_vision_details    # on = show details grid
 
-# --- Cost estimate ----------------------------------------------------------
+# --- Cost cards -------------------------------------------------------------
 import_tariff: 0.24
 export_tariff: 0.40
-quarter_days: 91
-# For an ACCURATE quarter cost, point these at kWh totals for the period:
-# import_energy_sensor: sensor.grid_import_energy_quarter
-# export_energy_sensor: sensor.grid_export_energy_quarter
+cost_period: both              # quarter | month | both
+month_start_day: 1             # billing month starts on this day
+quarter_start_date: 2026-07-01 # quarter anchor (YYYY-MM-DD or MM-DD); blank = Jan 1
+quarter_days: 91               # legacy fallback only
+# For ACCURATE costs, point each period at kWh totals (see examples/energy-meters.yaml):
+# import_energy_month_sensor: sensor.grid_import_energy_month
+# export_energy_month_sensor: sensor.grid_export_energy_month
+# import_energy_quarter_sensor: sensor.grid_import_energy_quarter
+# export_energy_quarter_sensor: sensor.grid_export_energy_quarter
+
+# --- Flow colours -----------------------------------------------------------
+flow_power_color: "#21e065"          # green: generation / supply
+flow_consumption_color: "#ffc233"    # amber: grid -> home
+flow_battery_grid_color: "#7c5cff"   # violet: grid -> battery & battery -> grid
 
 # --- Behaviour --------------------------------------------------------------
 poll_interval: 10     # seconds

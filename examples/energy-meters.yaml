@@ -45,14 +45,26 @@ sensor:
     method: left
 
 utility_meter:
+  # ---- Quarterly (resets every 3 months) ----
   grid_import_energy_quarter:
     name: Grid Import Energy (Quarter)
     source: sensor.grid_import_energy     # the integration sensor above
-    cycle: quarterly                      # resets every 3 months
+    cycle: quarterly
   grid_export_energy_quarter:
     name: Grid Export Energy (Quarter)
     source: sensor.grid_export_energy
     cycle: quarterly
+
+  # ---- Monthly (resets on the 1st; use `offset` to shift the reset day) ----
+  grid_import_energy_month:
+    name: Grid Import Energy (Month)
+    source: sensor.grid_import_energy
+    cycle: monthly
+    # offset: { days: 14 }   # e.g. bill cycle starts on the 15th
+  grid_export_energy_month:
+    name: Grid Export Energy (Month)
+    source: sensor.grid_export_energy
+    cycle: monthly
 
 
 # ---------------------------------------------------------------------------
@@ -80,9 +92,14 @@ utility_meter:
 #   ...
 #   import_tariff: 0.24
 #   export_tariff: 0.40
-#   import_energy_sensor: sensor.grid_import_energy_quarter
-#   export_energy_sensor: sensor.grid_export_energy_quarter
+#   cost_period: both                 # quarter | month | both
+#   month_start_day: 1
+#   quarter_start_date: 2026-07-01
+#   import_energy_month_sensor: sensor.grid_import_energy_month
+#   export_energy_month_sensor: sensor.grid_export_energy_month
+#   import_energy_quarter_sensor: sensor.grid_import_energy_quarter
+#   export_energy_quarter_sensor: sensor.grid_export_energy_quarter
 #
-# The cost card will switch from "ESTIMATE" to "FROM ENERGY" and compute:
+# Each cost card switches from "ESTIMATE" to "FROM ENERGY" and computes:
 #   cost = import_kWh × import_tariff − export_kWh × export_tariff
 # ===========================================================================
