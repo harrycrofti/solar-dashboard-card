@@ -84,10 +84,26 @@ poll_interval: 10     # seconds
 use_rest: false       # set true to also poll /api/states (usually unnecessary)
 solar_label: Solar
 
-# --- Statistics & graphs (today, from local midnight) -----------------------
+# --- Reporting / statistics -------------------------------------------------
 show_graphs: true
 graphs_collapsed: false
 graph_poll_interval: 300   # seconds between history refreshes
+report_default_range: today # today | yesterday | 7d | 30d | billing_month | billing_quarter
+report_default_tab: overview
+report_show_previous: true
+
+# Battery analytics + full-time forecast
+battery_capacity_kwh: 9.6
+battery_reserve_soc: 20
+battery_full_soc: 100
+battery_charge_efficiency: 0.92
+# Optional forecast sensors (kWh remaining from now)
+# solar_forecast_remaining_sensor: sensor.energy_production_today_remaining
+# load_forecast_remaining_sensor: sensor.house_load_forecast_remaining
+
+# Optional inverter capacity for "near clipping" reporting
+# solar_inverter_ac_capacity_w: 5000
+
 # Optional kWh-today sensors override the integrated estimates for accuracy:
 # pv_energy_today_sensor: sensor.goodwe_pv_energy_today
 # load_energy_today_sensor: sensor.goodwe_house_consumption_today
@@ -96,6 +112,24 @@ graph_poll_interval: 300   # seconds between history refreshes
 # battery_charge_energy_today_sensor: sensor.battery_charge_energy_today
 # battery_discharge_energy_today_sensor: sensor.battery_discharge_energy_today
 
+# Optional custom metrics shown on the Metrics tab:
+# metrics:
+#   - key: pool_pump
+#     label: Pool pump
+#     entity: sensor.pool_pump_power
+#     type: power
+#     aggregate: integrate
+#     chart: appliances
+#     color: "#00d2d3"
+#   - key: hot_water
+#     label: Hot water temp
+#     entity: sensor.hot_water_temperature
+#     type: temp
+#     aggregate: avg
+#     unit: "°C"
+#     chart: temperatures
+#     color: "#ff9f43"
+
 # --- Images (weather + day/night) -------------------------------------------
 images:
   default: /local/Sunny.png
@@ -103,7 +137,13 @@ images:
   rainy_day: /local/Raining.png
   lightning_rainy_day: /local/Thunderstorm.png
   cloudy_day: /local/Cloudy.png
+  partly_cloudy_day: /local/Cloudy.png
+  fog_day: /local/Cloudy.png
   clear_night: /local/Night.png
+  # Optional. If omitted, cloudy/fog at night falls back to the matching day image.
+  # cloudy_night: /local/Night Cloudy.png
+  # partly_cloudy_night: /local/Night Cloudy.png
+  # fog_night: /local/Night Cloudy.png
   rainy_night: /local/Night Raining.png
   lightning_rainy_night: /local/Night Thunderstorm.png
 

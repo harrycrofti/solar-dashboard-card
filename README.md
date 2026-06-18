@@ -2,8 +2,8 @@
 
 A responsive, production-ready **custom Lovelace card** for Home Assistant that
 renders a solar-powered home as a live visualization: a weather/day-night aware
-house image, four clickable node bubbles, animated energy-flow lines, a stats
-strip, a battery card and a quarter cost-estimate card.
+house image, clickable node bubbles, animated energy-flow lines, a stats strip,
+battery/cost cards and a multi-tab reporting panel.
 
 - ✅ **No build step** — single plain custom element, no external dependencies.
 - ✅ **No Mushroom / card-mod / Node-RED / extra cards** required.
@@ -25,7 +25,7 @@ strip, a battery card and a quarter cost-estimate card.
 | **Stats strip** | Solar generation, battery %, grid import/export, home load. |
 | **Battery card** | Percentage, horizontal bar, charging/discharging/idle status, battery health (SoH). |
 | **Cost card** | Monthly and/or quarterly cost with configurable tariffs and billing dates. Flagged as an estimate unless real kWh energy sensors are configured. |
-| **Statistics & graphs** | Collapsible section (GoodWe SEMS+/Sigenergy style): daily energy summary (kWh generated/used/imported/exported/charged/discharged), energy-dispersion donuts, power-over-the-day and battery-SoC-over-the-day charts — all from local midnight. |
+| **Reporting** | Collapsible multi-tab reports with range selection, previous-period comparison, CSV export, cost/battery/grid/solar/inverter/event views, custom metrics and battery-full ETA from solar forecast. |
 | **Details overlay** | Optional extended grid (PV strings, temps, voltages, work mode, faults) toggled by an `input_boolean`. |
 
 ---
@@ -102,7 +102,12 @@ images:
   rainy_day: /local/Raining.png
   lightning_rainy_day: /local/Thunderstorm.png
   cloudy_day: /local/Cloudy.png
+  partly_cloudy_day: /local/Cloudy.png
+  fog_day: /local/Cloudy.png
   clear_night: /local/Night.png
+  cloudy_night: /local/Night Cloudy.png
+  partly_cloudy_night: /local/Night Cloudy.png
+  fog_night: /local/Night Cloudy.png
   rainy_night: /local/Night Raining.png
   lightning_rainy_night: /local/Night Thunderstorm.png
 nodes:
@@ -196,26 +201,32 @@ Leave it at `0` (the default) to keep cost cards usage-only.
 
 ---
 
-## Statistics & graphs
+## Reporting
 
-A collapsible **Statistics & Graphs** section (inspired by the GoodWe SEMS+ and
-Sigenergy apps) sits below the main card and shows **today's data from local
-midnight**:
+A collapsible **Statistics & Graphs** report section sits below the main card.
+It has selectable ranges (`today`, `yesterday`, `7 days`, `30 days`,
+`billing month`, `billing quarter`) and tabs for Overview, Energy, Cost,
+Battery, Grid, Solar/PV, Inverter, Events and custom Metrics.
 
-- **Stat tiles** — generated, used, self-sufficiency %, self-consumption %.
-- **Daily energy summary** — horizontal bars for kWh generated, used, imported
-  (bought), exported (sold), charged (stored) and discharged.
-- **Energy dispersion** — two donuts: *Home supply* (solar / battery / grid) and
-  *Solar usage* (home / battery / grid).
-- **Power today** — a line chart of solar, load, import, export, charge and
-  discharge across the day.
-- **Battery charge today** — an area chart of battery SoC across the day.
+- **Interactive charts** — click legend items to show/hide series; peak markers
+  include hover tooltips; every chart includes average/max summaries.
+- **CSV export** — downloads the selected range's raw report series.
+- **Cost reporting** — import cost, feed-in credit, supply charge, net cost,
+  previous-range comparison and billing-period projection.
+- **Battery reporting** — charge/discharge kWh, grid vs solar charging estimate,
+  cycle estimate, efficiency, min/max SoC, time below reserve and time full.
+- **Forecast layer** — optional solar/load forecast sensors estimate whether the
+  battery can reach full and the approximate time remaining.
+- **PV/inverter health** — PV string comparison, peak generation, near-clipping
+  time, temperatures, grid voltage/current, work mode and fault state.
+- **Events** — notable period events such as grid charging, low reserve,
+  feed-in credit periods, clipping watch and inverter faults.
 
-**How the data is sourced.** The card fetches today's history from Home
-Assistant (websocket `history/history_during_period`) and **integrates the live
-power sensors into kWh on the fly**, so the graphs work even if you have no
-dedicated energy sensors. The charts render as lightweight inline SVG — no
-charting library or extra card is required.
+**How the data is sourced.** The card fetches Home Assistant history via
+`history/history_during_period` and integrates live power sensors into kWh on
+the fly, so reports work even if you have no dedicated energy sensors. The
+charts render as lightweight inline SVG — no charting library or extra card is
+required.
 
 **For metered accuracy**, configure any of the optional kWh-today sensors and
 they override the integrated estimates:
@@ -232,6 +243,29 @@ battery_discharge_energy_today_sensor: sensor.battery_discharge_energy_today
 History is refreshed every `graph_poll_interval` seconds (default 300) and only
 while the section is expanded, to keep the load light. Set `show_graphs: false`
 to hide the section entirely, or `graphs_collapsed: true` to start it folded.
+
+### Custom metrics
+
+Add extra sensors to the Metrics tab with YAML:
+
+```yaml
+metrics:
+  - key: pool_pump
+    label: Pool pump
+    entity: sensor.pool_pump_power
+    type: power       # power | energy | percent | temp | raw
+    aggregate: integrate  # avg | max | min | last | sum | integrate
+    chart: appliances
+    color: "#00d2d3"
+  - key: hot_water
+    label: Hot water temp
+    entity: sensor.hot_water_temperature
+    type: temp
+    aggregate: avg
+    unit: "°C"
+    chart: temperatures
+    color: "#ff9f43"
+```
 
 ---
 
@@ -278,7 +312,18 @@ to hide the section entirely, or `graphs_collapsed: true` to start it folded.
 | `show_graphs` | bool | `true` | Show the statistics & graphs section. |
 | `graphs_collapsed` | bool | `false` | Start the graphs section collapsed. |
 | `graph_poll_interval` | number | `300` | Seconds between history refreshes for the graphs. |
+| `report_default_range` | string | `today` | Initial report range: `today`, `yesterday`, `7d`, `30d`, `billing_month`, `billing_quarter`. |
+| `report_default_tab` | string | `overview` | Initial report tab: `overview`, `energy`, `cost`, `battery`, `grid`, `solar`, `inverter`, `events`, `metrics`. |
+| `report_show_previous` | bool | `true` | Fetch and compare the previous matching range where relevant. |
+| `battery_capacity_kwh` | number | _(none)_ | Battery capacity used for cycle estimates and full-time forecasts. |
+| `battery_reserve_soc` | number | `20` | Reserve threshold used for "time below reserve". |
+| `battery_full_soc` | number | `100` | Target SoC used for "time full" and battery-full ETA. |
+| `battery_charge_efficiency` | number | `0.92` | Forecast conversion factor for solar surplus into stored battery energy. |
+| `solar_forecast_remaining_sensor` | entity | _(none)_ | Optional kWh remaining from solar forecast; used for battery-full ETA. |
+| `load_forecast_remaining_sensor` | entity | _(none)_ | Optional kWh remaining load forecast; subtracted from solar forecast for surplus. |
+| `solar_inverter_ac_capacity_w` | number | _(none)_ | Inverter AC capacity; used to flag time spent near clipping. |
 | `pv_energy_today_sensor` … `battery_discharge_energy_today_sensor` | entity | _(none)_ | Optional kWh-today sensors that **override** the integrated estimates (`pv_/load_/import_/export_/battery_charge_/battery_discharge_energy_today_sensor`). |
+| `metrics` | list | `[]` | Optional custom metric definitions for the Metrics tab. |
 | `images` | map | _(see below)_ | Image paths per weather/day-night key. |
 | `nodes` | map | _(see below)_ | Node positions in percentages. |
 | `inverter_temp_sensor`, `ambient_temp_sensor`, `battery_temp_sensor`, `cell_temp_low_sensor`, `cell_temp_high_sensor`, `grid_voltage_sensor`, `grid_current_sensor`, `inverter_fault_sensor`, `inverter_state_sensor`, `work_mode_select`, `pv1..4_power/voltage/current_sensor` | entity | _(GoodWe defaults)_ | Shown in the details overlay. |
@@ -308,9 +353,13 @@ to hide the section entirely, or `graphs_collapsed: true` to start it folded.
   `off`, it is treated as always daytime. If the sun sensors are missing, it
   falls back to 06:00–18:00 local.
 - Day: `sunny`→`sunny_day`, `rainy`→`rainy_day`,
-  `lightning-rainy`→`lightning_rainy_day`, `cloudy`→`cloudy_day`.
+  `lightning-rainy`→`lightning_rainy_day`, `cloudy`→`cloudy_day`,
+  `partlycloudy`→`partly_cloudy_day`, `fog`→`fog_day`.
 - Night: `clear-night`→`clear_night`, `rainy`→`rainy_night`,
-  `lightning-rainy`→`lightning_rainy_night`.
+  `lightning-rainy`→`lightning_rainy_night`, `cloudy`→`cloudy_night`,
+  `partlycloudy`→`partly_cloudy_night`, `fog`→`fog_night`.
+- Cloudy/fog night keys are optional. If they are blank, the card falls back to
+  the matching day cloudy/fog image before falling back to `clear_night`.
 - Anything that doesn't match a rule falls back to `default`.
 
 ### Node positions
@@ -428,10 +477,10 @@ With `surplus = max(0, solar − load)`:
 
 ## Limitations of the cost estimate
 
-The **Quarter Cost** card shows one of two things:
+The monthly/quarterly cost cards show one of two things:
 
-1. **`FROM ENERGY` (accurate)** — when you configure `import_energy_sensor` and/or
-   `export_energy_sensor` (kWh totals for the quarter). Cost is computed as
+1. **`FROM ENERGY` (accurate)** — when you configure period-matching
+   import/export kWh totals. Cost is computed as
    `import_kWh × import_tariff − export_kWh × export_tariff` (plus
    `daily_connection_fee × days` if set).
 
@@ -448,9 +497,12 @@ used over time, which is what tariffs are billed on. Tariffs also vary
 (time-of-use, supply charges, tiered rates) — for true billing accuracy use the
 official Home Assistant **Energy dashboard** with your real cost sensors.
 
-To get accurate figures, create quarter-resetting `utility_meter` helpers for
-grid import and export and point `import_energy_sensor` / `export_energy_sensor`
-at them.
+To get accurate figures, create monthly and/or quarter-resetting
+`utility_meter` helpers for grid import and export and point the matching
+`import_energy_*_sensor` / `export_energy_*_sensor` options at them. The
+reporting panel separately integrates Home Assistant history for the selected
+range and should be treated as analytical reporting, not a replacement for your
+official utility bill.
 
 ---
 

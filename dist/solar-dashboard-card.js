@@ -10,7 +10,7 @@
  * License: MIT
  */
 
-const CARD_VERSION = "1.5.0";
+const CARD_VERSION = "1.7.0";
 
 /* eslint-disable no-console */
 console.info(
@@ -118,10 +118,21 @@ const DEFAULTS = {
   // drop-shadow on its alpha channel, so it hugs the house silhouette exactly.
   house_overlay_image: undefined,
 
-  // Statistics & graphs (today, from local midnight)
+  // Reporting / statistics
   show_graphs: true,
   graphs_collapsed: false,
   graph_poll_interval: 300, // seconds between history refreshes
+  report_default_range: "today",
+  report_default_tab: "overview",
+  report_show_previous: true,
+  battery_capacity_kwh: undefined,
+  battery_reserve_soc: 20,
+  battery_full_soc: 100,
+  battery_charge_efficiency: 0.92,
+  solar_inverter_ac_capacity_w: undefined,
+  solar_forecast_remaining_sensor: undefined,
+  load_forecast_remaining_sensor: undefined,
+  metrics: [],
   // Optional daily kWh-today sensors (override the integrated estimates)
   pv_energy_today_sensor: undefined,
   load_energy_today_sensor: undefined,
@@ -137,7 +148,12 @@ const DEFAULTS = {
     rainy_day: "/local/Raining.png",
     lightning_rainy_day: "/local/Thunderstorm.png",
     cloudy_day: "/local/Cloudy.png",
+    partly_cloudy_day: "/local/Cloudy.png",
+    fog_day: "/local/Cloudy.png",
     clear_night: "/local/Night.png",
+    cloudy_night: undefined,
+    partly_cloudy_night: undefined,
+    fog_night: undefined,
     rainy_night: "/local/Night Raining.png",
     lightning_rainy_night: "/local/Night Thunderstorm.png",
   },
@@ -166,6 +182,27 @@ const GRAPH_PALETTE = {
   dis: "#38d39f", // discharged (teal)
   soc: "#21e065", // battery state of charge
 };
+
+const REPORT_RANGES = [
+  ["today", "Today"],
+  ["yesterday", "Yesterday"],
+  ["7d", "7 days"],
+  ["30d", "30 days"],
+  ["billing_month", "Billing month"],
+  ["billing_quarter", "Billing quarter"],
+];
+
+const REPORT_TABS = [
+  ["overview", "Overview"],
+  ["energy", "Energy"],
+  ["cost", "Cost"],
+  ["battery", "Battery"],
+  ["grid", "Grid"],
+  ["solar", "Solar/PV"],
+  ["inverter", "Inverter"],
+  ["events", "Events"],
+  ["metrics", "Metrics"],
+];
 
 /* Per-direction flow-dot colours. There is no per-"kind" grouping any more —
  * each direction has its own colour, overridable via the flow_colors config. */
@@ -200,6 +237,9 @@ class SolarDashboardCard extends HTMLElement {
     this._els = {};
     this._timer = undefined;
     this._restStates = undefined; // cache from REST polling
+    this._reportRange = undefined;
+    this._reportTab = undefined;
+    this._seriesEnabled = {};
   }
 
   /* ---- Lovelace lifecycle ---- */
@@ -223,7 +263,10 @@ class SolarDashboardCard extends HTMLElement {
     merged.home_glow = { ...DEFAULTS.home_glow, ...(config.home_glow || {}) };
     merged.flow_colors = { ...(config.flow_colors || {}) };
     merged.node_colors = { ...(config.node_colors || {}) };
+    merged.metrics = this._normaliseMetrics(config.metrics || []);
     this._config = this._resolveEntities(merged);
+    this._reportRange = this._reportRange || merged.report_default_range || "today";
+    this._reportTab = this._reportTab || merged.report_default_tab || "overview";
     this._built = false; // force rebuild
     if (this.shadowRoot) this.shadowRoot.innerHTML = "";
     this._maybeBuild();
@@ -308,6 +351,47 @@ class SolarDashboardCard extends HTMLElement {
       cfg.grid_consumption_sensor ||
       "sensor.grid_export_power";
     return cfg;
+  }
+
+  _normaliseMetrics(metrics) {
+    const src = Array.isArray(metrics)
+      ? metrics
+      : Object.entries(metrics || {}).map(([key, value]) => ({
+          key,
+          ...(value || {}),
+        }));
+    return src
+      .filter((m) => m && m.entity)
+      .map((m, i) => {
+        const key = String(m.key || m.name || m.entity || `metric_${i}`)
+          .toLowerCase()
+          .replace(/[^a-z0-9_]+/g, "_")
+          .replace(/^_+|_+$/g, "");
+        return {
+          key: key || `metric_${i}`,
+          label: String(m.label || m.name || m.entity),
+          entity: m.entity,
+          type: String(m.type || "raw").toLowerCase(), // power, energy, percent, temp, raw
+          aggregate: String(m.aggregate || "avg").toLowerCase(), // avg, max, min, last, sum, integrate
+          chart: String(m.chart || "metrics").toLowerCase(),
+          unit: m.unit,
+          color: m.color || this._metricColor(i),
+        };
+      });
+  }
+
+  _metricColor(i) {
+    const colors = [
+      "#f5c542",
+      "#5aa9ff",
+      "#38d39f",
+      "#ff5d5d",
+      "#7c5cff",
+      "#21e065",
+      "#ff9f43",
+      "#00d2d3",
+    ];
+    return colors[i % colors.length];
   }
 
   /* ---- state helpers (prefer hass.states, fall back to REST cache) ---- */
@@ -413,6 +497,40 @@ class SolarDashboardCard extends HTMLElement {
     return `${sign}$${Math.abs(v).toFixed(2)}`;
   }
 
+  _fmtKwh(v, digits = 2) {
+    if (v === null || v === undefined || !Number.isFinite(v)) return "—";
+    return `${v.toFixed(digits)} kWh`;
+  }
+
+  _fmtDuration(hours) {
+    if (hours === null || hours === undefined || !Number.isFinite(hours) || hours < 0)
+      return "—";
+    const mins = Math.round(hours * 60);
+    if (mins < 60) return `${mins} min`;
+    const h = Math.floor(mins / 60);
+    const m = mins % 60;
+    return m ? `${h}h ${m}m` : `${h}h`;
+  }
+
+  _fmtDateTime(ms) {
+    if (!Number.isFinite(ms)) return "—";
+    return new Date(ms).toLocaleString(undefined, {
+      month: "short",
+      day: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+    });
+  }
+
+  _esc(v) {
+    return String(v ?? "")
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
+  }
+
   /* ---- day / night + image selection ---- */
 
   _isDaytime() {
@@ -434,62 +552,97 @@ class SolarDashboardCard extends HTMLElement {
   }
 
   _selectImage() {
-    const img = this._config.images;
     const day = this._isDaytime();
     const wRaw = this._rawState(this._config.weather_entity);
     const cond = wRaw ? String(wRaw).toLowerCase() : "";
 
-    let key = "default";
+    let keys = ["default"];
     if (day) {
       switch (cond) {
         case "sunny":
         case "clear":
         case "clear-day":
-          key = "sunny_day";
+          keys = ["sunny_day", "default"];
           break;
         case "rainy":
         case "pouring":
         case "snowy-rainy":
-          key = "rainy_day";
+          keys = ["rainy_day", "default"];
           break;
         case "lightning-rainy":
         case "lightning":
-          key = "lightning_rainy_day";
+          keys = ["lightning_rainy_day", "rainy_day", "default"];
           break;
         case "cloudy":
+          keys = ["cloudy_day", "default"];
+          break;
         case "partlycloudy":
+          keys = ["partly_cloudy_day", "cloudy_day", "default"];
+          break;
         case "fog":
-          key = "cloudy_day";
+          keys = ["fog_day", "cloudy_day", "default"];
           break;
         default:
-          key = "default";
+          keys = ["default"];
       }
     } else {
       switch (cond) {
         case "clear-night":
         case "clear":
         case "sunny":
-          key = "clear_night";
+          keys = ["clear_night", "default"];
           break;
         case "rainy":
         case "pouring":
         case "snowy-rainy":
-          key = "rainy_night";
+          keys = ["rainy_night", "rainy_day", "clear_night", "default"];
           break;
         case "lightning-rainy":
         case "lightning":
-          key = "lightning_rainy_night";
+          keys = [
+            "lightning_rainy_night",
+            "lightning_rainy_day",
+            "rainy_night",
+            "clear_night",
+            "default",
+          ];
           break;
         case "cloudy":
+          keys = ["cloudy_night", "cloudy_day", "clear_night", "default"];
+          break;
         case "partlycloudy":
+          keys = [
+            "partly_cloudy_night",
+            "cloudy_night",
+            "partly_cloudy_day",
+            "cloudy_day",
+            "clear_night",
+            "default",
+          ];
+          break;
         case "fog":
-          key = "clear_night"; // no dedicated night-cloudy image supplied
+          keys = [
+            "fog_night",
+            "cloudy_night",
+            "fog_day",
+            "cloudy_day",
+            "clear_night",
+            "default",
+          ];
           break;
         default:
-          key = "clear_night";
+          keys = ["clear_night", "default"];
       }
     }
-    return img[key] || img.default || DEFAULTS.images.default;
+    return this._imageFromKeys(keys);
+  }
+
+  _imageFromKeys(keys) {
+    const img = this._config.images || {};
+    for (const key of keys) {
+      if (img[key]) return img[key];
+    }
+    return img.default || DEFAULTS.images.default;
   }
 
   /* ---- more-info dialog ---- */
@@ -650,7 +803,7 @@ class SolarDashboardCard extends HTMLElement {
             <ha-icon class="sdc-chevron" icon="mdi:chevron-down"></ha-icon>
           </button>
           <div class="sdc-graphs" id="graphs">
-            <div class="sdc-g-empty">Loading today's data…</div>
+            <div class="sdc-g-empty">Loading report...</div>
           </div>
         </div>`;
 
@@ -787,6 +940,14 @@ class SolarDashboardCard extends HTMLElement {
           this._maybeFetchGraphs();
         }
       });
+    }
+    if (this._els.graphsEl) {
+      this._els.graphsEl.addEventListener("click", (e) =>
+        this._handleReportClick(e)
+      );
+      this._els.graphsEl.addEventListener("change", (e) =>
+        this._handleReportChange(e)
+      );
     }
 
     this._built = true;
@@ -1125,54 +1286,37 @@ class SolarDashboardCard extends HTMLElement {
     if (this._config.show_graphs === false) return;
     if (!this._hass || !this._hass.callWS) return;
     if (this._graphsCollapsed) return; // only fetch while visible
-    const dayKey = new Date().toDateString();
+    const win = this._reportWindow(this._reportRange);
+    const windowKey = `${win.range}:${win.start.toDateString()}:${win.end.toDateString()}`;
     const interval = (Number(this._config.graph_poll_interval) || 300) * 1000;
     const stale =
       !this._lastGraphFetch ||
       Date.now() - this._lastGraphFetch > interval ||
-      this._graphDay !== dayKey;
+      this._graphWindowKey !== windowKey;
     if (stale && !this._graphFetching) this._fetchGraphs();
   }
 
   async _fetchGraphs() {
     this._graphFetching = true;
     try {
-      const C = this._config;
-      const now = new Date();
-      const start = new Date(
-        now.getFullYear(),
-        now.getMonth(),
-        now.getDate(),
-        0,
-        0,
-        0,
-        0
-      );
-      const map = {
-        solar: C.solar_generation_sensor,
-        load: C.load_power_sensor,
-        charge: C.battery_charge_sensor,
-        discharge: C.battery_discharge_sensor,
-        import: C.grid_import_sensor,
-        export: C.grid_export_sensor,
-        soc: C.battery_soc_sensor,
-      };
-      const ids = [...new Set(Object.values(map).filter(Boolean))];
-      const res = await this._hass.callWS({
-        type: "history/history_during_period",
-        start_time: start.toISOString(),
-        end_time: now.toISOString(),
-        entity_ids: ids,
-        minimal_response: false,
-        no_attributes: true,
-      });
-      const series = {};
-      for (const key in map) {
-        series[key] = this._series(res, map[key], now.getTime());
+      const win = this._reportWindow(this._reportRange);
+      const map = this._historyMap();
+      const series = await this._fetchHistory(map, win.start, win.end);
+      let previousSeries = null;
+      if (this._config.report_show_previous !== false) {
+        previousSeries = await this._fetchHistory(
+          map,
+          win.previousStart,
+          win.previousEnd
+        );
       }
-      this._graphData = this._computeGraphs(series, start.getTime(), now.getTime());
+      this._graphData = this._computeGraphs(
+        series,
+        win,
+        previousSeries
+      );
       this._lastGraphFetch = Date.now();
-      this._graphDay = now.toDateString();
+      this._graphWindowKey = `${win.range}:${win.start.toDateString()}:${win.end.toDateString()}`;
       this._drawGraphs();
     } catch (e) {
       if (this._els.graphsEl && !this._graphData) {
@@ -1184,15 +1328,125 @@ class SolarDashboardCard extends HTMLElement {
     }
   }
 
-  /** Normalise a history response series to [{t(ms), v(number)}], power→W. */
-  _series(res, entity, endMs) {
+  _reportWindow(range) {
+    const now = new Date();
+    const startOfDay = (d) =>
+      new Date(d.getFullYear(), d.getMonth(), d.getDate(), 0, 0, 0, 0);
+    const addDays = (d, days) =>
+      new Date(d.getFullYear(), d.getMonth(), d.getDate() + days, 0, 0, 0, 0);
+    const today = startOfDay(now);
+    let start = today;
+    let end = now;
+    let label = "Today";
+    switch (range) {
+      case "yesterday":
+        start = addDays(today, -1);
+        end = today;
+        label = "Yesterday";
+        break;
+      case "7d":
+        start = addDays(today, -6);
+        label = "Last 7 days";
+        break;
+      case "30d":
+        start = addDays(today, -29);
+        label = "Last 30 days";
+        break;
+      case "billing_month":
+        start = this._periodStart("month");
+        label = "Billing month";
+        break;
+      case "billing_quarter":
+        start = this._periodStart("quarter");
+        label = "Billing quarter";
+        break;
+      case "today":
+      default:
+        range = "today";
+        label = "Today";
+    }
+    const span = Math.max(3600000, end.getTime() - start.getTime());
+    let previousStart = new Date(start.getTime() - span);
+    let previousEnd = new Date(start.getTime());
+    if (range === "today") {
+      previousStart = addDays(start, -1);
+      previousEnd = new Date(previousStart.getTime() + span);
+    }
+    return {
+      range,
+      label,
+      start,
+      end,
+      previousStart,
+      previousEnd,
+    };
+  }
+
+  _historyMap() {
+    const C = this._config;
+    const map = {
+      solar: { entity: C.solar_generation_sensor, mode: "power" },
+      load: { entity: C.load_power_sensor, mode: "power" },
+      charge: { entity: C.battery_charge_sensor, mode: "power" },
+      discharge: { entity: C.battery_discharge_sensor, mode: "power" },
+      import: { entity: C.grid_import_sensor, mode: "power" },
+      export: { entity: C.grid_export_sensor, mode: "power" },
+      soc: { entity: C.battery_soc_sensor, mode: "raw" },
+    };
+    (C.metrics || []).forEach((m) => {
+      map[`metric_${m.key}`] = {
+        entity: m.entity,
+        mode: this._metricSeriesMode(m),
+        metric: m,
+      };
+    });
+    return map;
+  }
+
+  _metricSeriesMode(metric) {
+    if (metric.type === "power") return "power";
+    if (metric.type === "energy") return "energy";
+    return "raw";
+  }
+
+  async _fetchHistory(map, start, end) {
+    const ids = [
+      ...new Set(
+        Object.values(map)
+          .map((m) => m.entity)
+          .filter(Boolean)
+      ),
+    ];
+    if (!ids.length) return {};
+    const res = await this._hass.callWS({
+      type: "history/history_during_period",
+      start_time: start.toISOString(),
+      end_time: end.toISOString(),
+      entity_ids: ids,
+      minimal_response: false,
+      no_attributes: true,
+    });
+    const series = {};
+    for (const key in map) {
+      series[key] = this._series(res, map[key].entity, end.getTime(), map[key].mode);
+    }
+    return series;
+  }
+
+  /** Normalise a history response series to [{t(ms), v(number)}]. */
+  _series(res, entity, endMs, mode = "power") {
     if (!entity || !res || !res[entity]) return [];
     const unit = String(
       (this._stateObj(entity)?.attributes || {}).unit_of_measurement || ""
     ).toLowerCase();
     let scale = 1;
-    if (unit.includes("kw") && !unit.includes("kwh")) scale = 1000;
-    else if (unit.includes("mw")) scale = 1000000;
+    if (mode === "power") {
+      if (unit.includes("kw") && !unit.includes("kwh")) scale = 1000;
+      else if (unit.includes("mw")) scale = 1000000;
+    } else if (mode === "energy") {
+      if (unit.includes("mwh")) scale = 1000;
+      else if (unit.includes("wh") && !unit.includes("kwh")) scale = 1 / 1000;
+    }
     const pts = [];
     for (const p of res[entity]) {
       const raw = p.s !== undefined ? p.s : p.state;
@@ -1222,7 +1476,7 @@ class SolarDashboardCard extends HTMLElement {
     return wh / 1000;
   }
 
-  _computeGraphs(series, startMs, nowMs) {
+  _coreKwh(series, useTodayOverrides) {
     const C = this._config;
     let generated = this._integrate(series.solar);
     let used = this._integrate(series.load);
@@ -1232,42 +1486,311 @@ class SolarDashboardCard extends HTMLElement {
     let discharged = this._integrate(series.discharge);
 
     // Optional overrides from dedicated daily kWh sensors.
-    const ov = (k) => (C[k] ? this._num(C[k]) : null);
-    const o = {
-      pv: ov("pv_energy_today_sensor"),
-      load: ov("load_energy_today_sensor"),
-      imp: ov("import_energy_today_sensor"),
-      exp: ov("export_energy_today_sensor"),
-      chg: ov("battery_charge_energy_today_sensor"),
-      dis: ov("battery_discharge_energy_today_sensor"),
-    };
-    if (o.pv !== null) generated = o.pv;
-    if (o.load !== null) used = o.load;
-    if (o.imp !== null) imported = o.imp;
-    if (o.exp !== null) exported = o.exp;
-    if (o.chg !== null) charged = o.chg;
-    if (o.dis !== null) discharged = o.dis;
+    if (useTodayOverrides) {
+      const ov = (k) => (C[k] ? this._num(C[k]) : null);
+      const o = {
+        pv: ov("pv_energy_today_sensor"),
+        load: ov("load_energy_today_sensor"),
+        imp: ov("import_energy_today_sensor"),
+        exp: ov("export_energy_today_sensor"),
+        chg: ov("battery_charge_energy_today_sensor"),
+        dis: ov("battery_discharge_energy_today_sensor"),
+      };
+      if (o.pv !== null) generated = o.pv;
+      if (o.load !== null) used = o.load;
+      if (o.imp !== null) imported = o.imp;
+      if (o.exp !== null) exported = o.exp;
+      if (o.chg !== null) charged = o.chg;
+      if (o.dis !== null) discharged = o.dis;
+    }
+    return { generated, used, imported, exported, charged, discharged };
+  }
 
+  _computeGraphs(series, win, previousSeries) {
+    const kwh = this._coreKwh(series, win.range === "today");
+    const previousKwh = previousSeries
+      ? this._coreKwh(previousSeries, false)
+      : null;
     const c0 = (x) => Math.max(0, x);
-    const solarSelf = c0(generated - exported - charged); // solar used on-site
+    const solarSelf = c0(kwh.generated - kwh.exported - kwh.charged); // solar used on-site
     const stats = {
-      selfSufficiency: used > 0 ? c0(1 - imported / used) : 0,
-      selfConsumption: generated > 0 ? c0(1 - exported / generated) : 0,
+      selfSufficiency:
+        kwh.used > 0 ? Math.min(1, c0(1 - kwh.imported / kwh.used)) : 0,
+      selfConsumption:
+        kwh.generated > 0 ? Math.min(1, c0(1 - kwh.exported / kwh.generated)) : 0,
     };
+    const customMetrics = this._computeCustomMetrics(series);
     return {
-      kwh: { generated, used, imported, exported, charged, discharged },
+      kwh,
+      previousKwh,
       disp: {
         solarSelf,
-        charged,
-        exported,
+        charged: kwh.charged,
+        exported: kwh.exported,
         homeFromSolar: solarSelf,
-        homeFromBattery: discharged,
-        homeFromGrid: imported,
+        homeFromBattery: kwh.discharged,
+        homeFromGrid: kwh.imported,
       },
       stats,
+      battery: this._batteryStats(series, kwh),
+      cost: this._costReport(kwh, previousKwh, win),
+      solar: this._solarStats(series, kwh),
+      inverter: this._inverterReport(),
+      forecast: this._batteryForecast(),
+      customMetrics,
       series,
-      domain: { start: startMs, end: startMs + 86400000, now: nowMs },
+      window: win,
+      domain: { start: win.start.getTime(), end: win.end.getTime(), now: Date.now() },
     };
+  }
+
+  _seriesStats(series) {
+    const pts = (series || []).filter((p) => Number.isFinite(p.v));
+    if (!pts.length)
+      return { min: null, max: null, avg: null, last: null, peakTime: null };
+    let min = pts[0].v;
+    let max = pts[0].v;
+    let sum = 0;
+    let peakTime = pts[0].t;
+    pts.forEach((p) => {
+      if (p.v < min) min = p.v;
+      if (p.v > max) {
+        max = p.v;
+        peakTime = p.t;
+      }
+      sum += p.v;
+    });
+    return {
+      min,
+      max,
+      avg: sum / pts.length,
+      last: pts[pts.length - 1].v,
+      peakTime,
+    };
+  }
+
+  _valueAt(series, t) {
+    if (!series || !series.length) return null;
+    let v = series[0].v;
+    for (const p of series) {
+      if (p.t > t) break;
+      v = p.v;
+    }
+    return v;
+  }
+
+  _durationWhere(series, predicate) {
+    if (!series || series.length < 2) return 0;
+    let h = 0;
+    for (let i = 1; i < series.length; i++) {
+      const v = (series[i].v + series[i - 1].v) / 2;
+      if (predicate(v)) h += (series[i].t - series[i - 1].t) / 3600000;
+    }
+    return h;
+  }
+
+  _integrateWhen(powerSeries, conditionSeries, predicate) {
+    if (!powerSeries || powerSeries.length < 2) return 0;
+    let wh = 0;
+    for (let i = 1; i < powerSeries.length; i++) {
+      const mid = (powerSeries[i].t + powerSeries[i - 1].t) / 2;
+      const power = (powerSeries[i].v + powerSeries[i - 1].v) / 2;
+      const other = this._valueAt(conditionSeries, mid) || 0;
+      if (predicate(power, other)) {
+        wh += power * ((powerSeries[i].t - powerSeries[i - 1].t) / 3600000);
+      }
+    }
+    return wh / 1000;
+  }
+
+  _batteryStats(series, kwh) {
+    const C = this._config;
+    const soc = this._seriesStats(series.soc);
+    const capacity = Number(C.battery_capacity_kwh);
+    const reserve = Number(C.battery_reserve_soc);
+    const full = Number(C.battery_full_soc) || 100;
+    const cycleEstimate =
+      Number.isFinite(capacity) && capacity > 0
+        ? (kwh.discharged || 0) / capacity
+        : null;
+    const efficiency =
+      kwh.charged > 0 ? Math.min(1.5, Math.max(0, kwh.discharged / kwh.charged)) : null;
+    const reserveHours = Number.isFinite(reserve)
+      ? this._durationWhere(series.soc, (v) => v <= reserve)
+      : 0;
+    const fullHours = this._durationWhere(series.soc, (v) => v >= full);
+    const gridCharged = this._integrateWhen(
+      series.charge,
+      series.import,
+      (charge, imp) => charge > 20 && imp > 20
+    );
+    return {
+      soc,
+      capacity: Number.isFinite(capacity) ? capacity : null,
+      cycleEstimate,
+      efficiency,
+      reserveSoc: Number.isFinite(reserve) ? reserve : null,
+      reserveHours,
+      fullSoc: full,
+      fullHours,
+      gridCharged,
+      solarCharged: Math.max(0, kwh.charged - gridCharged),
+    };
+  }
+
+  _costReport(kwh, previousKwh, win) {
+    const C = this._config;
+    const importTariff = Number(C.import_tariff) || 0;
+    const exportTariff = Number(C.export_tariff) || 0;
+    const dailyFee = Number(C.daily_connection_fee) || 0;
+    let days = Math.max(
+      1,
+      Math.ceil((win.end.getTime() - win.start.getTime()) / 86400000)
+    );
+    if (win.range === "billing_month") days = this._periodElapsedDays("month");
+    if (win.range === "billing_quarter")
+      days = this._periodElapsedDays("quarter");
+    const usage = kwh.imported * importTariff;
+    const credit = kwh.exported * exportTariff;
+    const supply = dailyFee * days;
+    const net = usage - credit + supply;
+    const previous =
+      previousKwh && this._config.report_show_previous !== false
+        ? previousKwh.imported * importTariff -
+          previousKwh.exported * exportTariff +
+          dailyFee * days
+        : null;
+    let projected = null;
+    if (win.range === "billing_month") {
+      projected = (net / Math.max(1, this._periodElapsedDays("month"))) * this._periodDays("month");
+    } else if (win.range === "billing_quarter") {
+      projected =
+        (net / Math.max(1, this._periodElapsedDays("quarter"))) *
+        this._periodDays("quarter");
+    }
+    return { importTariff, exportTariff, dailyFee, days, usage, credit, supply, net, previous, projected };
+  }
+
+  _solarStats(series, kwh) {
+    const C = this._config;
+    const solar = this._seriesStats(series.solar);
+    const capacity = Number(C.solar_inverter_ac_capacity_w);
+    const clippingHours =
+      Number.isFinite(capacity) && capacity > 0
+        ? this._durationWhere(series.solar, (v) => v >= capacity * 0.98)
+        : 0;
+    const strings = [1, 2, 3, 4]
+      .map((i) => {
+        const p = this._powerW(C[`pv${i}_power_sensor`]);
+        const v = this._num(C[`pv${i}_voltage_sensor`]);
+        const a = this._num(C[`pv${i}_current_sensor`]);
+        if (p === null && v === null && a === null) return null;
+        return { id: `PV${i}`, power: p || 0, voltage: v, current: a };
+      })
+      .filter(Boolean);
+    const maxString = strings.length ? Math.max(...strings.map((s) => s.power)) : 0;
+    strings.forEach((s) => {
+      s.relative = maxString > 0 ? s.power / maxString : null;
+      s.low = maxString > 0 && s.power < maxString * 0.75;
+    });
+    return { generated: kwh.generated, solar, capacity: Number.isFinite(capacity) ? capacity : null, clippingHours, strings };
+  }
+
+  _inverterReport() {
+    const C = this._config;
+    const raw = (entity) => this._rawState(entity);
+    return {
+      workMode: raw(C.work_mode_select) || "—",
+      state: raw(C.inverter_state_sensor) || "—",
+      fault: raw(C.inverter_fault_sensor) || "—",
+      inverterTemp: this._fmtTemp(C.inverter_temp_sensor),
+      ambientTemp: this._fmtTemp(C.ambient_temp_sensor),
+      batteryTemp: this._fmtTemp(C.battery_temp_sensor),
+      gridVoltage: this._fmtNum(C.grid_voltage_sensor, 1, "V"),
+      gridCurrent: this._fmtNum(C.grid_current_sensor, 2, "A"),
+    };
+  }
+
+  _batteryForecast() {
+    const C = this._config;
+    const capacity = Number(C.battery_capacity_kwh);
+    const soc = this._num(C.battery_soc_sensor);
+    const target = Number(C.battery_full_soc) || 100;
+    const eff = Number(C.battery_charge_efficiency) || 1;
+    const chargeW = this._powerW(C.battery_charge_sensor) || 0;
+    const solarRemaining = C.solar_forecast_remaining_sensor
+      ? this._energyKwh(C.solar_forecast_remaining_sensor)
+      : null;
+    const loadRemaining = C.load_forecast_remaining_sensor
+      ? this._energyKwh(C.load_forecast_remaining_sensor)
+      : null;
+    if (!Number.isFinite(capacity) || capacity <= 0 || soc === null) {
+      return {
+        available: false,
+        message: "Set battery_capacity_kwh and battery_soc_sensor for full-time estimates.",
+      };
+    }
+    const remainingKwh = Math.max(0, ((target - soc) / 100) * capacity);
+    const currentEta = chargeW > 20 ? remainingKwh / (chargeW / 1000) : null;
+    const sunset = Date.parse(this._rawState(C.sunset_sensor) || "");
+    const daylightHours = Number.isFinite(sunset)
+      ? Math.max(0.25, (sunset - Date.now()) / 3600000)
+      : 6;
+    const forecastSurplus =
+      solarRemaining !== null
+        ? Math.max(0, solarRemaining - (loadRemaining || 0))
+        : null;
+    const forecastCharge = forecastSurplus !== null ? forecastSurplus * eff : null;
+    const forecastEta =
+      forecastCharge && forecastCharge > 0
+        ? remainingKwh / Math.max(0.05, forecastCharge / daylightHours)
+        : null;
+    const etaHours = currentEta !== null ? currentEta : forecastEta;
+    const fullAt = etaHours !== null ? Date.now() + etaHours * 3600000 : null;
+    const likelyFull =
+      remainingKwh <= 0 ||
+      (forecastCharge !== null && forecastCharge >= remainingKwh) ||
+      (currentEta !== null && currentEta <= daylightHours + 0.5);
+    return {
+      available: true,
+      soc,
+      target,
+      capacity,
+      remainingKwh,
+      currentEta,
+      forecastEta,
+      etaHours,
+      fullAt,
+      solarRemaining,
+      loadRemaining,
+      forecastSurplus,
+      forecastCharge,
+      likelyFull,
+      message:
+        remainingKwh <= 0
+          ? "Battery is at or above the full target."
+          : likelyFull
+          ? "Forecast says the battery can reach the full target."
+          : "Forecast surplus is not enough to reach the full target.",
+    };
+  }
+
+  _computeCustomMetrics(series) {
+    return (this._config.metrics || []).map((m) => {
+      const key = `metric_${m.key}`;
+      const s = series[key] || [];
+      const st = this._seriesStats(s);
+      let value = st.avg;
+      let unit = m.unit || "";
+      if (m.aggregate === "integrate" || (m.type === "power" && m.aggregate === "sum")) {
+        value = this._integrate(s);
+        unit = m.unit || "kWh";
+      } else if (m.aggregate === "max") value = st.max;
+      else if (m.aggregate === "min") value = st.min;
+      else if (m.aggregate === "last") value = st.last;
+      else if (m.aggregate === "sum") value = s.reduce((a, p) => a + p.v, 0);
+      return { ...m, series: s, stats: st, value, unit };
+    });
   }
 
   /* ---- chart primitives ---- */
@@ -1359,47 +1882,234 @@ class SolarDashboardCard extends HTMLElement {
       .join("")}</div>`;
   }
 
-  _drawGraphs() {
+  _handleReportClick(e) {
+    const tab = e.target.closest("[data-report-tab]");
+    if (tab) {
+      this._reportTab = tab.dataset.reportTab;
+      this._drawGraphs();
+      return;
+    }
+    const series = e.target.closest("[data-series]");
+    if (series) {
+      const key = series.dataset.series;
+      this._seriesEnabled[key] = this._seriesEnabled[key] === false;
+      this._drawGraphs();
+      return;
+    }
+    if (e.target.closest("[data-report-export]")) {
+      this._downloadReportCsv();
+    }
+  }
+
+  _handleReportChange(e) {
+    const range = e.target.closest("[data-report-range]");
+    if (!range) return;
+    this._reportRange = range.value;
+    this._graphData = null;
+    this._lastGraphFetch = 0;
+    this._els.graphsEl.innerHTML =
+      '<div class="sdc-g-empty">Loading report...</div>';
+    this._fetchGraphs();
+  }
+
+  _downloadReportCsv() {
     const g = this._graphData;
-    const host = this._els.graphsEl;
-    if (!g || !host) return;
+    if (!g) return;
+    const defs = [
+      ["solar_w", g.series.solar],
+      ["load_w", g.series.load],
+      ["import_w", g.series.import],
+      ["export_w", g.series.export],
+      ["battery_charge_w", g.series.charge],
+      ["battery_discharge_w", g.series.discharge],
+      ["battery_soc_pct", g.series.soc],
+      ...g.customMetrics.map((m) => [`metric_${m.key}`, m.series]),
+    ];
+    const times = [
+      ...new Set(
+        defs.flatMap(([, series]) => (series || []).map((p) => p.t))
+      ),
+    ].sort((a, b) => a - b);
+    const header = ["time", ...defs.map(([name]) => name)];
+    const rows = times.map((t) => {
+      const vals = defs.map(([, series]) => {
+        const v = this._valueAt(series, t);
+        return v === null || v === undefined ? "" : String(v);
+      });
+      return [new Date(t).toISOString(), ...vals].join(",");
+    });
+    const csv = [header.join(","), ...rows].join("\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `solar-dashboard-${g.window.range}-${new Date()
+      .toISOString()
+      .slice(0, 10)}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  _reportShell(g, body) {
+    const rangeOptions = REPORT_RANGES.map(
+      ([key, label]) =>
+        `<option value="${key}" ${this._reportRange === key ? "selected" : ""}>${label}</option>`
+    ).join("");
+    const tabs = REPORT_TABS.map(
+      ([key, label]) =>
+        `<button class="sdc-r-tab ${this._reportTab === key ? "active" : ""}" data-report-tab="${key}">${label}</button>`
+    ).join("");
+    return `
+      <div class="sdc-r-toolbar">
+        <label>
+          <span>Range</span>
+          <select data-report-range>${rangeOptions}</select>
+        </label>
+        <div class="sdc-r-window">${this._esc(g.window.label)} · ${this._fmtDateTime(
+      g.window.start.getTime()
+    )} - ${this._fmtDateTime(g.window.end.getTime())}</div>
+        <button class="sdc-r-export" data-report-export>CSV</button>
+      </div>
+      <div class="sdc-r-tabs">${tabs}</div>
+      ${body}
+      <div class="sdc-g-note">
+        Report kWh figures are integrated from Home Assistant history for the selected range.
+        Today's optional <code>*_energy_today_sensor</code> values override integrated estimates only on the Today range.
+      </div>`;
+  }
+
+  _tile(label, value, color, sub = "") {
+    return `<div class="sdc-g-tile">
+      <span class="sdc-g-tile-v" style="color:${color || "var(--sdc-fg)"}">${value}</span>
+      <span class="sdc-g-tile-k">${label}</span>
+      ${sub ? `<span class="sdc-g-tile-sub">${sub}</span>` : ""}
+    </div>`;
+  }
+
+  _delta(now, prev, formatter = (v) => v.toFixed(1)) {
+    if (prev === null || prev === undefined || !Number.isFinite(prev)) return "";
+    const diff = now - prev;
+    const sign = diff > 0 ? "+" : "";
+    return `${sign}${formatter(diff)} vs previous`;
+  }
+
+  _xAxis(d) {
+    const mid = d.start + (d.end - d.start) / 2;
+    return `<div class="sdc-g-x"><span>${this._fmtDateTime(d.start)}</span><span>${this._fmtDateTime(mid)}</span><span>${this._fmtDateTime(d.end)}</span></div>`;
+  }
+
+  _seriesChart(title, defs, options = {}) {
+    const H = options.height || 66;
+    const visible = defs.filter((d) => this._seriesEnabled[d.key] !== false);
+    let vmax = options.vmax ?? 100;
+    let vmin = options.vmin ?? 0;
+    visible.forEach((d) =>
+      (d.series || []).forEach((p) => {
+        if (p.v > vmax) vmax = p.v;
+        if (options.autoMin && p.v < vmin) vmin = p.v;
+      })
+    );
+    const paths = visible
+      .map((d) => {
+        const st = this._seriesStats(d.series);
+        const path = this._linePath(d.series || [], options.domain, vmin, vmax, H);
+        if (!path) return "";
+        const peakX =
+          st.peakTime !== null
+            ? this._scaleX(st.peakTime, options.domain).toFixed(2)
+            : null;
+        const peakY =
+          st.max !== null
+            ? (H - ((st.max - vmin) / (vmax - vmin || 1)) * H).toFixed(2)
+            : null;
+        return `
+          <path d="${path}" fill="none" stroke="${d.color}" stroke-width="1.6" vector-effect="non-scaling-stroke">
+            <title>${this._esc(d.label)} peak ${this._metricFormat(st.max, d.unit)} at ${this._fmtDateTime(st.peakTime)}</title>
+          </path>
+          ${
+            peakX !== null
+              ? `<circle cx="${peakX}" cy="${peakY}" r="1.5" fill="${d.color}"><title>${this._esc(d.label)} peak ${this._metricFormat(st.max, d.unit)}</title></circle>`
+              : ""
+          }`;
+      })
+      .join("");
+    const legend = `<div class="sdc-g-legend sdc-g-legend-buttons">${defs
+      .map((d) => {
+        const off = this._seriesEnabled[d.key] === false;
+        return `<button class="${off ? "off" : ""}" data-series="${d.key}"><i style="background:${d.color}"></i>${this._esc(d.label)}</button>`;
+      })
+      .join("")}</div>`;
+    const summary = `<div class="sdc-r-summary">${defs
+      .map((d) => {
+        const st = this._seriesStats(d.series);
+        return `<span>${this._esc(d.label)} <b>${this._metricFormat(st.avg, d.unit)}</b> avg · <b>${this._metricFormat(st.max, d.unit)}</b> max</span>`;
+      })
+      .join("")}</div>`;
+    return `
+      <div class="sdc-g-panel">
+        <div class="sdc-g-h">${title}</div>
+        <svg class="sdc-g-line" viewBox="0 0 100 ${H}" preserveAspectRatio="none">
+          ${this._gridlines(H)}
+          ${paths}
+        </svg>
+        ${this._xAxis(options.domain)}
+        ${legend}
+        ${summary}
+      </div>`;
+  }
+
+  _metricFormat(value, unit, digits = 1) {
+    if (value === null || value === undefined || !Number.isFinite(value)) return "—";
+    if (unit === "W") return this._fmtPower(value);
+    if (unit === "kWh") return this._fmtKwh(value, 2);
+    if (unit === "%") return `${Math.round(value)}%`;
+    return `${value.toFixed(digits)}${unit ? " " + unit : ""}`;
+  }
+
+  _forecastPanel(g) {
+    const f = g.forecast;
+    if (!f.available) {
+      return `<div class="sdc-g-panel"><div class="sdc-g-h">Battery full estimate</div><div class="sdc-r-muted">${this._esc(f.message)}</div></div>`;
+    }
+    return `<div class="sdc-g-panel">
+      <div class="sdc-g-h">Battery full estimate</div>
+      <div class="sdc-r-kpis">
+        ${this._tile("Remaining", this._fmtKwh(f.remainingKwh, 2), GRAPH_PALETTE.soc)}
+        ${this._tile("ETA", this._fmtDuration(f.etaHours), GRAPH_PALETTE.chg, f.fullAt ? `around ${this._fmtDateTime(f.fullAt)}` : "")}
+        ${this._tile("Forecast surplus", f.forecastSurplus === null ? "—" : this._fmtKwh(f.forecastSurplus, 2), GRAPH_PALETTE.pv)}
+        ${this._tile("Likely full", f.likelyFull ? "Yes" : "No", f.likelyFull ? GRAPH_PALETTE.exp : GRAPH_PALETTE.imp)}
+      </div>
+      <div class="sdc-r-muted">${this._esc(f.message)}</div>
+    </div>`;
+  }
+
+  _renderOverview(g) {
+    const k = g.kwh;
+    const p = g.previousKwh;
+    const tiles =
+      this._tile("Generated", this._fmtKwh(k.generated, 1), GRAPH_PALETTE.pv, p ? this._delta(k.generated, p.generated) : "") +
+      this._tile("Used", this._fmtKwh(k.used, 1), GRAPH_PALETTE.load, p ? this._delta(k.used, p.used) : "") +
+      this._tile("Self-sufficiency", `${Math.round(g.stats.selfSufficiency * 100)}%`, GRAPH_PALETTE.exp) +
+      this._tile("Net cost", this._fmtMoney(g.cost.net), g.cost.net <= 0 ? GRAPH_PALETTE.exp : GRAPH_PALETTE.imp);
+    return `
+      <div class="sdc-g-tiles">${tiles}</div>
+      ${this._forecastPanel(g)}
+      ${this._seriesChart(
+        "Power",
+        [
+          { key: "solar", label: "Solar", color: GRAPH_PALETTE.pv, series: g.series.solar, unit: "W" },
+          { key: "load", label: "Load", color: GRAPH_PALETTE.load, series: g.series.load, unit: "W" },
+          { key: "import", label: "Import", color: GRAPH_PALETTE.imp, series: g.series.import, unit: "W" },
+          { key: "export", label: "Export", color: GRAPH_PALETTE.exp, series: g.series.export, unit: "W" },
+        ],
+        { domain: g.domain, vmax: 100 }
+      )}`;
+  }
+
+  _renderEnergy(g) {
     const k = g.kwh;
     const P = GRAPH_PALETTE;
-    const H = 60;
-    const s = g.series;
-    const d = g.domain;
-
-    // stat tiles
-    const tiles = [
-      { k: "Generated", v: k.generated.toFixed(1) + " kWh", c: P.pv },
-      { k: "Used", v: k.used.toFixed(1) + " kWh", c: P.load },
-      {
-        k: "Self-sufficiency",
-        v: Math.round(g.stats.selfSufficiency * 100) + "%",
-        c: P.exp,
-      },
-      {
-        k: "Self-consumption",
-        v: Math.round(g.stats.selfConsumption * 100) + "%",
-        c: P.chg,
-      },
-    ]
-      .map(
-        (t) =>
-          `<div class="sdc-g-tile"><span class="sdc-g-tile-v" style="color:${t.c}">${t.v}</span><span class="sdc-g-tile-k">${t.k}</span></div>`
-      )
-      .join("");
-
-    // energy summary bars
-    const maxBar = Math.max(
-      k.generated,
-      k.used,
-      k.imported,
-      k.exported,
-      k.charged,
-      k.discharged,
-      0.1
-    );
+    const maxBar = Math.max(k.generated, k.used, k.imported, k.exported, k.charged, k.discharged, 0.1);
     const bars =
       this._barRow("Generated (PV)", k.generated, maxBar, P.pv) +
       this._barRow("Used (load)", k.used, maxBar, P.load) +
@@ -1407,127 +2117,213 @@ class SolarDashboardCard extends HTMLElement {
       this._barRow("Exported (sold)", k.exported, maxBar, P.exp) +
       this._barRow("Stored (charged)", k.charged, maxBar, P.chg) +
       this._barRow("Discharged", k.discharged, maxBar, P.dis);
-
-    // dispersion donuts
     const homeDonut = this._donut(
       [
-        { label: "Solar", value: g.disp.homeFromSolar, color: P.pv },
-        { label: "Battery", value: g.disp.homeFromBattery, color: P.dis },
-        { label: "Grid", value: g.disp.homeFromGrid, color: P.imp },
+        { value: g.disp.homeFromSolar, color: P.pv },
+        { value: g.disp.homeFromBattery, color: P.dis },
+        { value: g.disp.homeFromGrid, color: P.imp },
       ],
       Math.round(g.stats.selfSufficiency * 100) + "%"
     );
     const solarDonut = this._donut(
       [
-        { label: "Home", value: g.disp.solarSelf, color: P.load },
-        { label: "Battery", value: g.disp.charged, color: P.chg },
-        { label: "Grid", value: g.disp.exported, color: P.exp },
+        { value: g.disp.solarSelf, color: P.load },
+        { value: g.disp.charged, color: P.chg },
+        { value: g.disp.exported, color: P.exp },
       ],
       Math.round(g.stats.selfConsumption * 100) + "%"
     );
-
-    // power-over-day chart
-    let vmax = 100;
-    ["solar", "load", "import", "export", "charge", "discharge"].forEach((key) =>
-      s[key].forEach((p) => {
-        if (p.v > vmax) vmax = p.v;
-      })
-    );
-    const line = (key, color) =>
-      `<path d="${this._linePath(
-        s[key],
-        d,
-        0,
-        vmax,
-        H
-      )}" fill="none" stroke="${color}" stroke-width="1.6" vector-effect="non-scaling-stroke" />`;
-    const powerSvg = `
-      <svg class="sdc-g-line" viewBox="0 0 100 ${H}" preserveAspectRatio="none">
-        ${this._gridlines(H)}
-        <path d="${this._areaPath(s.solar, d, 0, vmax, H)}" fill="${P.pv}22" stroke="none" />
-        ${line("solar", P.pv)}
-        ${line("load", P.load)}
-        ${line("import", P.imp)}
-        ${line("export", P.exp)}
-        ${line("charge", P.chg)}
-        ${line("discharge", P.dis)}
-      </svg>`;
-
-    // battery SoC chart
-    const socSvg = `
-      <svg class="sdc-g-line" viewBox="0 0 100 ${H}" preserveAspectRatio="none">
-        ${this._gridlines(H)}
-        <path d="${this._areaPath(s.soc, d, 0, 100, H)}" fill="${P.soc}22" stroke="none" />
-        <path d="${this._linePath(
-          s.soc,
-          d,
-          0,
-          100,
-          H
-        )}" fill="none" stroke="${P.soc}" stroke-width="1.6" vector-effect="non-scaling-stroke" />
-      </svg>`;
-
-    const xAxis = `<div class="sdc-g-x"><span>12am</span><span>6am</span><span>12pm</span><span>6pm</span><span>12am</span></div>`;
-    const socNow = this._num(this._config.battery_soc_sensor);
-
-    host.innerHTML = `
-      <div class="sdc-g-tiles">${tiles}</div>
-
-      <div class="sdc-g-panel">
-        <div class="sdc-g-h">Daily energy summary</div>
-        <div class="sdc-g-bars">${bars}</div>
-      </div>
-
+    return `
+      <div class="sdc-g-panel"><div class="sdc-g-h">Energy summary</div><div class="sdc-g-bars">${bars}</div></div>
       <div class="sdc-g-panel">
         <div class="sdc-g-h">Energy dispersion</div>
         <div class="sdc-g-donuts">
-          <div class="sdc-g-donut-box">
-            ${homeDonut}
-            <div class="sdc-g-donut-cap">Home supply</div>
-            ${this._legend([
-              { l: "Solar", c: P.pv },
-              { l: "Battery", c: P.dis },
-              { l: "Grid", c: P.imp },
-            ])}
-          </div>
-          <div class="sdc-g-donut-box">
-            ${solarDonut}
-            <div class="sdc-g-donut-cap">Solar usage</div>
-            ${this._legend([
-              { l: "Home", c: P.load },
-              { l: "Battery", c: P.chg },
-              { l: "Grid", c: P.exp },
-            ])}
-          </div>
+          <div class="sdc-g-donut-box">${homeDonut}<div class="sdc-g-donut-cap">Home supply</div>${this._legend([{ l: "Solar", c: P.pv }, { l: "Battery", c: P.dis }, { l: "Grid", c: P.imp }])}</div>
+          <div class="sdc-g-donut-box">${solarDonut}<div class="sdc-g-donut-cap">Solar usage</div>${this._legend([{ l: "Home", c: P.load }, { l: "Battery", c: P.chg }, { l: "Grid", c: P.exp }])}</div>
         </div>
-      </div>
-
-      <div class="sdc-g-panel">
-        <div class="sdc-g-h">Power today</div>
-        ${powerSvg}
-        ${xAxis}
-        ${this._legend([
-          { l: "Solar", c: P.pv },
-          { l: "Load", c: P.load },
-          { l: "Import", c: P.imp },
-          { l: "Export", c: P.exp },
-          { l: "Charge", c: P.chg },
-          { l: "Discharge", c: P.dis },
-        ])}
-      </div>
-
-      <div class="sdc-g-panel">
-        <div class="sdc-g-h">Battery charge today${
-          socNow !== null ? ` · now ${Math.round(socNow)}%` : ""
-        }</div>
-        ${socSvg}
-        ${xAxis}
-      </div>
-
-      <div class="sdc-g-note">
-        kWh figures are integrated from live power history since local midnight.
-        Configure the optional <code>*_energy_today_sensor</code> options for metered accuracy.
       </div>`;
+  }
+
+  _renderCost(g) {
+    const c = g.cost;
+    const rows = [
+      ["Imported", this._fmtKwh(g.kwh.imported, 2), `@ $${c.importTariff}/kWh`, this._fmtMoney(c.usage)],
+      ["Exported", this._fmtKwh(g.kwh.exported, 2), `@ $${c.exportTariff}/kWh`, "-" + this._fmtMoney(c.credit)],
+      ["Supply", `${c.days.toFixed(1)} days`, `@ $${c.dailyFee}/day`, this._fmtMoney(c.supply)],
+      ["Net", "", "", this._fmtMoney(c.net)],
+    ];
+    return `
+      <div class="sdc-r-kpis">
+        ${this._tile("Net cost", this._fmtMoney(c.net), c.net <= 0 ? GRAPH_PALETTE.exp : GRAPH_PALETTE.imp, c.previous !== null ? this._delta(c.net, c.previous, (v) => this._fmtMoney(v)) : "")}
+        ${this._tile("Imported cost", this._fmtMoney(c.usage), GRAPH_PALETTE.imp)}
+        ${this._tile("Feed-in credit", this._fmtMoney(c.credit), GRAPH_PALETTE.exp)}
+        ${this._tile("Projected bill", c.projected === null ? "—" : this._fmtMoney(c.projected), GRAPH_PALETTE.chg)}
+      </div>
+      <div class="sdc-g-panel">
+        <div class="sdc-g-h">Cost breakdown</div>
+        <div class="sdc-r-table">${rows.map((r) => `<div><span>${r[0]}</span><span>${r[1]}</span><span>${r[2]}</span><b>${r[3]}</b></div>`).join("")}</div>
+      </div>`;
+  }
+
+  _renderBattery(g) {
+    const b = g.battery;
+    return `
+      <div class="sdc-r-kpis">
+        ${this._tile("SoC min/max", `${b.soc.min === null ? "—" : Math.round(b.soc.min)}% / ${b.soc.max === null ? "—" : Math.round(b.soc.max)}%`, GRAPH_PALETTE.soc)}
+        ${this._tile("Charged", this._fmtKwh(g.kwh.charged, 2), GRAPH_PALETTE.chg, `Solar ${this._fmtKwh(b.solarCharged, 2)} · Grid ${this._fmtKwh(b.gridCharged, 2)}`)}
+        ${this._tile("Discharged", this._fmtKwh(g.kwh.discharged, 2), GRAPH_PALETTE.dis)}
+        ${this._tile("Cycles", b.cycleEstimate === null ? "—" : b.cycleEstimate.toFixed(2), GRAPH_PALETTE.pv)}
+        ${this._tile("Efficiency", b.efficiency === null ? "—" : `${Math.round(b.efficiency * 100)}%`, GRAPH_PALETTE.exp)}
+        ${this._tile("Below reserve", this._fmtDuration(b.reserveHours), GRAPH_PALETTE.imp, b.reserveSoc !== null ? `<= ${b.reserveSoc}%` : "")}
+        ${this._tile("Full time", this._fmtDuration(b.fullHours), GRAPH_PALETTE.soc, `>= ${b.fullSoc}%`)}
+      </div>
+      ${this._forecastPanel(g)}
+      ${this._seriesChart("Battery SoC", [{ key: "soc", label: "SoC", color: GRAPH_PALETTE.soc, series: g.series.soc, unit: "%" }], { domain: g.domain, vmin: 0, vmax: 100 })}
+      ${this._seriesChart("Battery power", [
+        { key: "charge", label: "Charge", color: GRAPH_PALETTE.chg, series: g.series.charge, unit: "W" },
+        { key: "discharge", label: "Discharge", color: GRAPH_PALETTE.dis, series: g.series.discharge, unit: "W" },
+      ], { domain: g.domain, vmax: 100 })}`;
+  }
+
+  _renderGrid(g) {
+    return `
+      <div class="sdc-r-kpis">
+        ${this._tile("Imported", this._fmtKwh(g.kwh.imported, 2), GRAPH_PALETTE.imp)}
+        ${this._tile("Exported", this._fmtKwh(g.kwh.exported, 2), GRAPH_PALETTE.exp)}
+        ${this._tile("Net grid", this._fmtKwh(g.kwh.imported - g.kwh.exported, 2), GRAPH_PALETTE.chg)}
+        ${this._tile("Grid cost", this._fmtMoney(g.cost.usage - g.cost.credit), GRAPH_PALETTE.pv)}
+      </div>
+      ${this._seriesChart("Grid power", [
+        { key: "import", label: "Import", color: GRAPH_PALETTE.imp, series: g.series.import, unit: "W" },
+        { key: "export", label: "Export", color: GRAPH_PALETTE.exp, series: g.series.export, unit: "W" },
+      ], { domain: g.domain, vmax: 100 })}`;
+  }
+
+  _renderSolar(g) {
+    const s = g.solar;
+    const stringRows = s.strings.length
+      ? `<div class="sdc-r-table">${s.strings
+          .map(
+            (pv) =>
+              `<div><span>${pv.id}${pv.low ? " · check" : ""}</span><span>${this._fmtPower(pv.power)}</span><span>${pv.voltage === null ? "—" : pv.voltage.toFixed(1) + " V"}</span><b>${pv.current === null ? "—" : pv.current.toFixed(2) + " A"}</b></div>`
+          )
+          .join("")}</div>`
+      : `<div class="sdc-r-muted">Configure PV string sensors to compare string performance.</div>`;
+    return `
+      <div class="sdc-r-kpis">
+        ${this._tile("Generated", this._fmtKwh(g.kwh.generated, 2), GRAPH_PALETTE.pv)}
+        ${this._tile("Peak", this._fmtPower(s.solar.max), GRAPH_PALETTE.pv, s.solar.peakTime ? this._fmtDateTime(s.solar.peakTime) : "")}
+        ${this._tile("Self-consumed", `${Math.round(g.stats.selfConsumption * 100)}%`, GRAPH_PALETTE.exp)}
+        ${this._tile("Near clipping", this._fmtDuration(s.clippingHours), GRAPH_PALETTE.imp, s.capacity ? `>= ${this._fmtPower(s.capacity * 0.98)}` : "set solar_inverter_ac_capacity_w")}
+      </div>
+      ${this._seriesChart("Solar generation", [{ key: "solar", label: "Solar", color: GRAPH_PALETTE.pv, series: g.series.solar, unit: "W" }], { domain: g.domain, vmax: 100 })}
+      <div class="sdc-g-panel"><div class="sdc-g-h">PV strings</div>${stringRows}</div>`;
+  }
+
+  _renderInverter(g) {
+    const i = g.inverter;
+    const rows = [
+      ["Work mode", i.workMode],
+      ["Inverter state", i.state],
+      ["Fault", i.fault],
+      ["Inverter temp", i.inverterTemp],
+      ["Ambient temp", i.ambientTemp],
+      ["Battery temp", i.batteryTemp],
+      ["Grid voltage", i.gridVoltage],
+      ["Grid current", i.gridCurrent],
+    ];
+    return `<div class="sdc-g-panel"><div class="sdc-g-h">Inverter health</div><div class="sdc-r-table two">${rows.map((r) => `<div><span>${r[0]}</span><b>${this._esc(r[1])}</b></div>`).join("")}</div></div>`;
+  }
+
+  _renderEvents(g) {
+    const events = [];
+    if (g.cost.net < 0) events.push(["Credit period", `Feed-in credit exceeds import plus supply by ${this._fmtMoney(Math.abs(g.cost.net))}.`]);
+    if (g.battery.gridCharged > 0.05) events.push(["Grid charging", `${this._fmtKwh(g.battery.gridCharged, 2)} charged while importing from grid.`]);
+    if (g.battery.reserveHours > 0) events.push(["Reserve low", `Battery spent ${this._fmtDuration(g.battery.reserveHours)} at or below reserve.`]);
+    if (g.solar.clippingHours > 0) events.push(["Solar clipping watch", `Solar sat near inverter capacity for ${this._fmtDuration(g.solar.clippingHours)}.`]);
+    if (g.inverter.fault && g.inverter.fault !== "—" && String(g.inverter.fault).toLowerCase() !== "none") events.push(["Inverter fault", g.inverter.fault]);
+    if (!events.length) events.push(["No notable events", "No cost, battery, grid or inverter exceptions detected in this range."]);
+    return `<div class="sdc-g-panel"><div class="sdc-g-h">Events</div><div class="sdc-r-events">${events.map((e) => `<div><b>${this._esc(e[0])}</b><span>${this._esc(e[1])}</span></div>`).join("")}</div></div>`;
+  }
+
+  _renderMetrics(g) {
+    if (!g.customMetrics.length)
+      return `<div class="sdc-g-panel"><div class="sdc-g-h">Custom metrics</div><div class="sdc-r-muted">Add <code>metrics:</code> entries in YAML to track extra sensors here.</div></div>`;
+    const defs = g.customMetrics.map((m) => ({
+      key: `metric_${m.key}`,
+      label: m.label,
+      color: m.color,
+      series: m.series,
+      unit: m.type === "power" ? "W" : m.unit || "",
+      chart: m.chart || "metrics",
+    }));
+    const tiles = g.customMetrics
+      .map((m) => {
+        const unit =
+          m.unit ||
+          (m.type === "power"
+            ? m.aggregate === "integrate" || m.aggregate === "sum"
+              ? "kWh"
+              : "W"
+            : "");
+        return this._tile(m.label, this._metricFormat(m.value, unit), m.color, m.aggregate);
+      })
+      .join("");
+    const charts = Object.entries(
+      defs.reduce((acc, d) => {
+        const group = d.chart || "metrics";
+        if (!acc[group]) acc[group] = [];
+        acc[group].push(d);
+        return acc;
+      }, {})
+    )
+      .map(([group, groupDefs]) =>
+        this._seriesChart(`${group.replace(/_/g, " ")} metrics`, groupDefs, {
+          domain: g.domain,
+          vmax: 100,
+          autoMin: true,
+        })
+      )
+      .join("");
+    return `<div class="sdc-g-tiles">${tiles}</div>${charts}`;
+  }
+
+  _drawGraphs() {
+    const g = this._graphData;
+    const host = this._els.graphsEl;
+    if (!g || !host) return;
+    let body = "";
+    switch (this._reportTab) {
+      case "energy":
+        body = this._renderEnergy(g);
+        break;
+      case "cost":
+        body = this._renderCost(g);
+        break;
+      case "battery":
+        body = this._renderBattery(g);
+        break;
+      case "grid":
+        body = this._renderGrid(g);
+        break;
+      case "solar":
+        body = this._renderSolar(g);
+        break;
+      case "inverter":
+        body = this._renderInverter(g);
+        break;
+      case "events":
+        body = this._renderEvents(g);
+        break;
+      case "metrics":
+        body = this._renderMetrics(g);
+        break;
+      case "overview":
+      default:
+        this._reportTab = "overview";
+        body = this._renderOverview(g);
+    }
+    host.innerHTML = this._reportShell(g, body);
   }
 
   /* ---- styles ---- */
@@ -1909,6 +2705,128 @@ class SolarDashboardCard extends HTMLElement {
       .sdc-g-note { font-size:0.68rem; color: var(--sdc-muted); line-height:1.4; }
       .sdc-g-note code { background: rgba(255,255,255,0.08); padding:1px 4px; border-radius:4px; }
 
+      .sdc-r-toolbar {
+        display:grid;
+        grid-template-columns: minmax(130px, 180px) 1fr auto;
+        gap:8px;
+        align-items:end;
+      }
+      .sdc-r-toolbar label {
+        display:flex;
+        flex-direction:column;
+        gap:3px;
+        font-size:0.66rem;
+        color: var(--sdc-muted);
+        text-transform:uppercase;
+        letter-spacing:0.04em;
+      }
+      .sdc-r-toolbar select,
+      .sdc-r-export {
+        min-height:34px;
+        border:1px solid rgba(255,255,255,0.12);
+        border-radius:8px;
+        background: rgba(255,255,255,0.06);
+        color: var(--sdc-fg);
+        font-family:inherit;
+        font-size:0.8rem;
+        padding:6px 9px;
+      }
+      .sdc-r-export { cursor:pointer; font-weight:700; }
+      .sdc-r-window {
+        font-size:0.74rem;
+        color: var(--sdc-muted);
+        align-self:center;
+      }
+      .sdc-r-tabs {
+        display:flex;
+        flex-wrap:wrap;
+        gap:6px;
+      }
+      .sdc-r-tab {
+        min-height:32px;
+        border:1px solid rgba(255,255,255,0.10);
+        border-radius:8px;
+        background: rgba(255,255,255,0.045);
+        color: var(--sdc-muted);
+        font-family:inherit;
+        font-size:0.74rem;
+        padding:6px 9px;
+        cursor:pointer;
+      }
+      .sdc-r-tab.active {
+        color: var(--sdc-fg);
+        border-color: rgba(245,197,66,0.55);
+        background: rgba(245,197,66,0.12);
+      }
+      .sdc-r-kpis {
+        display:grid;
+        grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+        gap:8px;
+      }
+      .sdc-g-tile-sub {
+        font-size:0.62rem;
+        color: var(--sdc-muted);
+        text-align:center;
+        line-height:1.25;
+      }
+      .sdc-r-muted {
+        font-size:0.78rem;
+        color: var(--sdc-muted);
+        line-height:1.4;
+      }
+      .sdc-r-table {
+        display:flex;
+        flex-direction:column;
+        gap:6px;
+      }
+      .sdc-r-table > div {
+        display:grid;
+        grid-template-columns: minmax(90px, 1fr) minmax(70px, 1fr) minmax(70px, 1fr) minmax(70px, auto);
+        gap:8px;
+        align-items:center;
+        font-size:0.78rem;
+        border-bottom:1px solid rgba(255,255,255,0.06);
+        padding-bottom:6px;
+      }
+      .sdc-r-table.two > div { grid-template-columns: minmax(110px, 1fr) 1.5fr; }
+      .sdc-r-table span { color: var(--sdc-muted); }
+      .sdc-r-table b { color: var(--sdc-fg); text-align:right; }
+      .sdc-r-events {
+        display:flex;
+        flex-direction:column;
+        gap:8px;
+      }
+      .sdc-r-events > div {
+        display:flex;
+        flex-direction:column;
+        gap:2px;
+        padding-bottom:8px;
+        border-bottom:1px solid rgba(255,255,255,0.06);
+      }
+      .sdc-r-events b { font-size:0.82rem; }
+      .sdc-r-events span { font-size:0.76rem; color: var(--sdc-muted); line-height:1.35; }
+      .sdc-g-legend-buttons button {
+        display:inline-flex;
+        align-items:center;
+        gap:4px;
+        border:none;
+        background:none;
+        color: var(--sdc-muted);
+        font:inherit;
+        cursor:pointer;
+        padding:0;
+      }
+      .sdc-g-legend-buttons button.off { opacity:0.38; text-decoration:line-through; }
+      .sdc-r-summary {
+        display:flex;
+        flex-wrap:wrap;
+        gap:5px 12px;
+        margin-top:8px;
+        font-size:0.66rem;
+        color: var(--sdc-muted);
+      }
+      .sdc-r-summary b { color: var(--sdc-fg); }
+
       /* Responsive */
       @media (max-width: 600px) {
         .sdc-node-ring { width:42px; height:42px; }
@@ -1922,6 +2840,10 @@ class SolarDashboardCard extends HTMLElement {
         .sdc-g-tiles { grid-template-columns: repeat(2, 1fr); }
         .sdc-g-bar { grid-template-columns: 90px 1fr 64px; }
         .sdc-g-bar-l { font-size:0.66rem; }
+        .sdc-r-toolbar { grid-template-columns: 1fr auto; }
+        .sdc-r-window { grid-column: 1 / -1; }
+        .sdc-r-table > div { grid-template-columns: 1fr 1fr; }
+        .sdc-r-table > div span:nth-child(3) { display:none; }
       }
     `;
   }
@@ -1987,6 +2909,13 @@ const ENTITY_SECTIONS = [
       ["battery_discharge_energy_today_sensor", "Discharged today (kWh)"],
     ],
   },
+  {
+    title: "Forecast — optional battery full estimate sensors",
+    fields: [
+      ["solar_forecast_remaining_sensor", "Solar forecast remaining (kWh)"],
+      ["load_forecast_remaining_sensor", "Load forecast remaining (kWh)"],
+    ],
+  },
 ];
 
 const NUMBER_FIELDS = [
@@ -1996,6 +2925,11 @@ const NUMBER_FIELDS = [
   ["quarter_days", "Days in quarter", 1],
   ["poll_interval", "Poll interval (s)", 1],
   ["graph_poll_interval", "Graph refresh (s)", 10],
+  ["battery_capacity_kwh", "Battery capacity (kWh)", 0.1],
+  ["battery_reserve_soc", "Battery reserve SoC (%)", 1],
+  ["battery_full_soc", "Battery full target SoC (%)", 1],
+  ["battery_charge_efficiency", "Battery charge efficiency", 0.01],
+  ["solar_inverter_ac_capacity_w", "Inverter AC capacity (W)", 100],
 ];
 
 const IMAGE_KEYS = [
@@ -2004,7 +2938,12 @@ const IMAGE_KEYS = [
   "rainy_day",
   "lightning_rainy_day",
   "cloudy_day",
+  "partly_cloudy_day",
+  "fog_day",
   "clear_night",
+  "cloudy_night",
+  "partly_cloudy_night",
+  "fog_night",
   "rainy_night",
   "lightning_rainy_night",
 ];
@@ -2178,6 +3117,12 @@ class SolarDashboardCardEditor extends HTMLElement {
             } />
             <span>Start graphs collapsed</span>
           </label>
+          <label class="sdc-f sdc-check">
+            <input type="checkbox" data-boolexp="report_show_previous" ${
+              this._config.report_show_previous === false ? "" : "checked"
+            } />
+            <span>Compare against previous range</span>
+          </label>
           <label class="sdc-f">
             <span>Title (optional)</span>
             <input type="text" data-text="title" value="${ev("title")}" placeholder="(none)" />
@@ -2188,6 +3133,23 @@ class SolarDashboardCardEditor extends HTMLElement {
               "solar_label"
             )}" placeholder="${d.solar_label}" />
           </label>
+        </div>
+      </div>`;
+
+    const reportOptions = `
+      <div class="sdc-sec">
+        <div class="sdc-sec-h">Reporting defaults</div>
+        <div class="sdc-grid">
+          ${selectInput(
+            "report_default_range",
+            "Default range",
+            REPORT_RANGES.map((r) => r[0])
+          )}
+          ${selectInput(
+            "report_default_tab",
+            "Default tab",
+            REPORT_TABS.map((t) => t[0])
+          )}
         </div>
       </div>`;
 
@@ -2377,6 +3339,7 @@ class SolarDashboardCardEditor extends HTMLElement {
       <div class="sdc-note">Leave a field blank to use its built-in default (shown as placeholder).</div>
       ${sections}
       ${numbers}
+      ${reportOptions}
       ${costPeriod}
       ${flowColours}
       ${nodeColours}
