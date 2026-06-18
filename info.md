@@ -9,4 +9,4 @@ A responsive solar-powered home visualization for Home Assistant.
 - 100% configurable entities, node positions (percentages) and images.
 - No build step, no Mushroom / card-mod / Node-RED / extra cards required.
 
-See the [README](https://github.com/your-github-username/solar-dashboard-card) for full configuration.
+See the [README](https://github.com/harrycrofti/solar-dashboard-card) for full configuration.

@@ -3442,5 +3442,5 @@ window.customCards.push({
     "Responsive solar-powered home visualization with animated energy flows, node bubbles, battery and cost cards.",
   preview: false,
   documentationURL:
-    "https://github.com/your-github-username/solar-dashboard-card",
+    "https://github.com/harrycrofti/solar-dashboard-card",
 });

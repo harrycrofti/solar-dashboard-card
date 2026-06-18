@@ -37,7 +37,7 @@ battery/cost cards and a multi-tab reporting panel.
 1. In Home Assistant, open **HACS**.
 2. Click the **⋮ (three-dot) menu** → **Custom repositories**.
 3. Enter the repository URL, e.g.
-   `https://github.com/your-github-username/solar-dashboard-card`
+   `https://github.com/harrycrofti/solar-dashboard-card`
 4. For **Category / Type**, choose **Dashboard** (a.k.a. *Lovelace / Plugin*).
 5. Click **Add**, then find **Solar Dashboard Card** in the list and click
    **Download**.
@@ -49,7 +49,7 @@ manually (see below).
 
 ### Option B — Manual install
 
-1. Copy `dist/solar-dashboard-card.js` into your HA config at:
+1. Copy `solar-dashboard-card.js` into your HA config at:
    `<config>/www/solar-dashboard-card/solar-dashboard-card.js`
    (so it is served from `/local/solar-dashboard-card/solar-dashboard-card.js`).
 2. Add it as a Lovelace resource (see next section).
