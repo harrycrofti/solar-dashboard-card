@@ -10,7 +10,7 @@
  * License: MIT
  */
 
-const CARD_VERSION = "1.7.0";
+const CARD_VERSION = "1.8.0";
 
 /* eslint-disable no-console */
 console.info(
@@ -240,6 +240,9 @@ class SolarDashboardCard extends HTMLElement {
     this._reportRange = undefined;
     this._reportTab = undefined;
     this._seriesEnabled = {};
+    this._chartViews = {}; // per-chart zoom window {start,end}
+    this._chartDefs = {}; // per-chart series defs + options, kept across re-renders
+    this._chartPan = null; // active drag-to-pan state
   }
 
   /* ---- Lovelace lifecycle ---- */
@@ -942,12 +945,20 @@ class SolarDashboardCard extends HTMLElement {
       });
     }
     if (this._els.graphsEl) {
-      this._els.graphsEl.addEventListener("click", (e) =>
-        this._handleReportClick(e)
-      );
-      this._els.graphsEl.addEventListener("change", (e) =>
-        this._handleReportChange(e)
-      );
+      const gel = this._els.graphsEl;
+      gel.addEventListener("click", (e) => this._handleReportClick(e));
+      gel.addEventListener("change", (e) => this._handleReportChange(e));
+      // interactive zoom / pan / tooltip on charts
+      gel.addEventListener("wheel", (e) => this._onChartWheel(e), { passive: false });
+      gel.addEventListener("pointerdown", (e) => this._onChartPointerDown(e));
+      gel.addEventListener("pointermove", (e) => this._onChartPointerMove(e));
+      gel.addEventListener("pointerup", () => this._onChartPointerUp());
+      gel.addEventListener("pointercancel", () => this._onChartPointerUp());
+      gel.addEventListener("pointerleave", () => {
+        this._onChartPointerUp();
+        this._hideChartOverlays();
+      });
+      gel.addEventListener("dblclick", (e) => this._onChartDblClick(e));
     }
 
     this._built = true;
@@ -1513,11 +1524,21 @@ class SolarDashboardCard extends HTMLElement {
       : null;
     const c0 = (x) => Math.max(0, x);
     const solarSelf = c0(kwh.generated - kwh.exported - kwh.charged); // solar used on-site
+    const loadStats = this._seriesStats(series.load);
+    const solarStats0 = this._seriesStats(series.solar);
+    const co2Factor = Number(this._config.co2_factor_kg_per_kwh);
     const stats = {
       selfSufficiency:
         kwh.used > 0 ? Math.min(1, c0(1 - kwh.imported / kwh.used)) : 0,
       selfConsumption:
         kwh.generated > 0 ? Math.min(1, c0(1 - kwh.exported / kwh.generated)) : 0,
+      solarCoverage: kwh.used > 0 ? Math.min(1, solarSelf / kwh.used) : 0,
+      avgLoad: loadStats.avg,
+      peakLoad: loadStats.max,
+      peakLoadTime: loadStats.peakTime,
+      peakSolar: solarStats0.max,
+      co2Avoided: kwh.generated * (Number.isFinite(co2Factor) ? co2Factor : 0.79),
+      gridFreeHours: this._durationWhere(series.import, (v) => v < 20),
     };
     const customMetrics = this._computeCustomMetrics(series);
     return {
@@ -1654,6 +1675,9 @@ class SolarDashboardCard extends HTMLElement {
     const credit = kwh.exported * exportTariff;
     const supply = dailyFee * days;
     const net = usage - credit + supply;
+    // what the bill would have been with no solar/battery (import the whole load, no export credit)
+    const noSolarBill = kwh.used * importTariff + supply;
+    const savings = noSolarBill - net;
     const previous =
       previousKwh && this._config.report_show_previous !== false
         ? previousKwh.imported * importTariff -
@@ -1668,7 +1692,7 @@ class SolarDashboardCard extends HTMLElement {
         (net / Math.max(1, this._periodElapsedDays("quarter"))) *
         this._periodDays("quarter");
     }
-    return { importTariff, exportTariff, dailyFee, days, usage, credit, supply, net, previous, projected };
+    return { importTariff, exportTariff, dailyFee, days, usage, credit, supply, net, previous, projected, noSolarBill, savings };
   }
 
   _solarStats(series, kwh) {
@@ -1716,8 +1740,12 @@ class SolarDashboardCard extends HTMLElement {
     const capacity = Number(C.battery_capacity_kwh);
     const soc = this._num(C.battery_soc_sensor);
     const target = Number(C.battery_full_soc) || 100;
+    const reserve = Number(C.battery_reserve_soc);
+    const reserveSoc = Number.isFinite(reserve) ? reserve : 0;
     const eff = Number(C.battery_charge_efficiency) || 1;
     const chargeW = this._powerW(C.battery_charge_sensor) || 0;
+    const dischargeW = this._powerW(C.battery_discharge_sensor) || 0;
+    const loadW = this._powerW(C.load_power_sensor);
     const solarRemaining = C.solar_forecast_remaining_sensor
       ? this._energyKwh(C.solar_forecast_remaining_sensor)
       : null;
@@ -1727,14 +1755,25 @@ class SolarDashboardCard extends HTMLElement {
     if (!Number.isFinite(capacity) || capacity <= 0 || soc === null) {
       return {
         available: false,
-        message: "Set battery_capacity_kwh and battery_soc_sensor for full-time estimates.",
+        message:
+          "Set battery_capacity_kwh and battery_soc_sensor for charge/discharge estimates.",
       };
     }
-    const remainingKwh = Math.max(0, ((target - soc) / 100) * capacity);
-    const currentEta = chargeW > 20 ? remainingKwh / (chargeW / 1000) : null;
+    const now = Date.now();
+    const remainingKwh = Math.max(0, ((target - soc) / 100) * capacity); // to full target
+    const usableKwh = Math.max(0, ((soc - reserveSoc) / 100) * capacity); // down to reserve
+    const emptyKwh = Math.max(0, (soc / 100) * capacity); // down to 0%
+
+    // live mode from measured power
+    let mode = "idle";
+    if (chargeW > 20 && chargeW >= dischargeW) mode = "charging";
+    else if (dischargeW > 20 && dischargeW > chargeW) mode = "discharging";
+
+    // ---- charge timing ----
+    const currentChargeEta = chargeW > 20 ? remainingKwh / (chargeW / 1000) : null;
     const sunset = Date.parse(this._rawState(C.sunset_sensor) || "");
     const daylightHours = Number.isFinite(sunset)
-      ? Math.max(0.25, (sunset - Date.now()) / 3600000)
+      ? Math.max(0.25, (sunset - now) / 3600000)
       : 6;
     const forecastSurplus =
       solarRemaining !== null
@@ -1745,33 +1784,65 @@ class SolarDashboardCard extends HTMLElement {
       forecastCharge && forecastCharge > 0
         ? remainingKwh / Math.max(0.05, forecastCharge / daylightHours)
         : null;
-    const etaHours = currentEta !== null ? currentEta : forecastEta;
-    const fullAt = etaHours !== null ? Date.now() + etaHours * 3600000 : null;
+    const chargeEtaHours = currentChargeEta !== null ? currentChargeEta : forecastEta;
+    const fullAt = chargeEtaHours !== null ? now + chargeEtaHours * 3600000 : null;
     const likelyFull =
       remainingKwh <= 0 ||
       (forecastCharge !== null && forecastCharge >= remainingKwh) ||
-      (currentEta !== null && currentEta <= daylightHours + 0.5);
+      (currentChargeEta !== null && currentChargeEta <= daylightHours + 0.5);
+
+    // ---- discharge timing ----
+    // prefer the measured discharge power; fall back to current house load draw
+    const drawW = dischargeW > 20 ? dischargeW : mode === "discharging" && loadW ? loadW : dischargeW;
+    const timeToReserve = drawW > 20 ? usableKwh / (drawW / 1000) : null;
+    const timeToEmpty = drawW > 20 ? emptyKwh / (drawW / 1000) : null;
+    const reserveAt = timeToReserve !== null ? now + timeToReserve * 3600000 : null;
+    const emptyAt = timeToEmpty !== null ? now + timeToEmpty * 3600000 : null;
+
+    let message;
+    if (mode === "charging")
+      message =
+        remainingKwh <= 0
+          ? "Battery is at or above the full target."
+          : likelyFull
+          ? "On track to reach the full target."
+          : "Charging, but forecast surplus may not reach the full target.";
+    else if (mode === "discharging")
+      message =
+        timeToReserve !== null
+          ? `Discharging at ${this._fmtPower(drawW)} — about ${this._fmtDuration(
+              timeToReserve
+            )} of usable charge above reserve.`
+          : "Battery is discharging.";
+    else message = "Battery idle — no significant charge or discharge right now.";
+
     return {
       available: true,
+      mode,
       soc,
       target,
+      reserveSoc,
       capacity,
       remainingKwh,
-      currentEta,
+      usableKwh,
+      emptyKwh,
+      chargeW,
+      dischargeW,
+      drawW,
+      currentChargeEta,
       forecastEta,
-      etaHours,
+      chargeEtaHours,
       fullAt,
+      timeToReserve,
+      timeToEmpty,
+      reserveAt,
+      emptyAt,
       solarRemaining,
       loadRemaining,
       forecastSurplus,
       forecastCharge,
       likelyFull,
-      message:
-        remainingKwh <= 0
-          ? "Battery is at or above the full target."
-          : likelyFull
-          ? "Forecast says the battery can reach the full target."
-          : "Forecast surplus is not enough to reach the full target.",
+      message,
     };
   }
 
@@ -1896,6 +1967,12 @@ class SolarDashboardCard extends HTMLElement {
       this._drawGraphs();
       return;
     }
+    const reset = e.target.closest("[data-chart-reset]");
+    if (reset) {
+      delete this._chartViews[reset.dataset.chartReset];
+      this._redrawChart(reset.dataset.chartReset);
+      return;
+    }
     if (e.target.closest("[data-report-export]")) {
       this._downloadReportCsv();
     }
@@ -1907,6 +1984,7 @@ class SolarDashboardCard extends HTMLElement {
     this._reportRange = range.value;
     this._graphData = null;
     this._lastGraphFetch = 0;
+    this._chartViews = {}; // new range = fresh zoom
     this._els.graphsEl.innerHTML =
       '<div class="sdc-g-empty">Loading report...</div>';
     this._fetchGraphs();
@@ -1998,41 +2076,135 @@ class SolarDashboardCard extends HTMLElement {
     return `<div class="sdc-g-x"><span>${this._fmtDateTime(d.start)}</span><span>${this._fmtDateTime(mid)}</span><span>${this._fmtDateTime(d.end)}</span></div>`;
   }
 
-  _seriesChart(title, defs, options = {}) {
+  _slug(s) {
+    return String(s)
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/(^-|-$)/g, "");
+  }
+
+  /* Current zoom window for a chart, clamped to its full data domain. */
+  _chartViewFor(id) {
+    const def = this._chartDefs[id];
+    const full = def ? def.options.domain : null;
+    if (!full) return { start: 0, end: 1 };
+    const v = this._chartViews[id];
+    if (!v) return { start: full.start, end: full.end };
+    return this._clampView(full, v.start, v.end);
+  }
+
+  _clampView(full, start, end) {
+    const fullSpan = full.end - full.start;
+    const minSpan = Math.max(120000, fullSpan * 0.005); // never zoom past ~2 min / 0.5%
+    let span = end - start;
+    if (!Number.isFinite(span) || span <= 0) return { start: full.start, end: full.end };
+    if (span < minSpan) {
+      const c = (start + end) / 2;
+      start = c - minSpan / 2;
+      end = c + minSpan / 2;
+      span = minSpan;
+    }
+    if (span >= fullSpan) return { start: full.start, end: full.end };
+    if (start < full.start) {
+      end += full.start - start;
+      start = full.start;
+    }
+    if (end > full.end) {
+      start -= end - full.end;
+      end = full.end;
+    }
+    if (start < full.start) start = full.start;
+    return { start, end };
+  }
+
+  /* Recompute Y range over only the points inside the current zoom window —
+   * this is what makes zoomed-in graphs show fine detail. */
+  _visibleRange(defs, vd) {
+    let vmax = -Infinity;
+    let vmin = Infinity;
+    defs.forEach((d) => {
+      if (this._seriesEnabled[d.key] === false) return;
+      (d.series || []).forEach((p) => {
+        if (p.t < vd.start || p.t > vd.end || !Number.isFinite(p.v)) return;
+        if (p.v > vmax) vmax = p.v;
+        if (p.v < vmin) vmin = p.v;
+      });
+    });
+    return { vmax, vmin };
+  }
+
+  /* Build the inner SVG markup + resolved scale for the chart's current view. */
+  _chartInner(id) {
+    const def = this._chartDefs[id];
+    if (!def) return { svg: "", vd: { start: 0, end: 1 }, vmin: 0, vmax: 1 };
+    const { defs, options } = def;
     const H = options.height || 66;
+    const vd = this._chartViewFor(id);
     const visible = defs.filter((d) => this._seriesEnabled[d.key] !== false);
+    const range = this._visibleRange(defs, vd);
     let vmax = options.vmax ?? 100;
     let vmin = options.vmin ?? 0;
-    visible.forEach((d) =>
-      (d.series || []).forEach((p) => {
-        if (p.v > vmax) vmax = p.v;
-        if (options.autoMin && p.v < vmin) vmin = p.v;
+    if (options.clamp) {
+      // fixed scale (e.g. SoC 0-100), no autofit / headroom
+    } else {
+      if (Number.isFinite(range.vmax)) vmax = Math.max(options.vmin ?? 0, range.vmax);
+      if (options.autoMin && Number.isFinite(range.vmin)) vmin = Math.min(vmin, range.vmin);
+      if (vmax <= vmin) vmax = vmin + 1;
+      vmax += (vmax - vmin) * 0.08; // headroom so peaks aren't clipped
+    }
+    const grads = visible
+      .map((d) => {
+        const cid = `${id}-${d.key}`;
+        return `<linearGradient id="fill-${cid}" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="${d.color}" stop-opacity="0.85"/><stop offset="100%" stop-color="${d.color}" stop-opacity="0"/></linearGradient>`;
       })
-    );
+      .join("");
     const paths = visible
       .map((d) => {
-        const st = this._seriesStats(d.series);
-        const path = this._linePath(d.series || [], options.domain, vmin, vmax, H);
+        const series = d.series || [];
+        const path = this._linePath(series, vd, vmin, vmax, H);
         if (!path) return "";
-        const peakX =
-          st.peakTime !== null
-            ? this._scaleX(st.peakTime, options.domain).toFixed(2)
-            : null;
-        const peakY =
-          st.max !== null
-            ? (H - ((st.max - vmin) / (vmax - vmin || 1)) * H).toFixed(2)
-            : null;
+        const area = this._areaPath(series, vd, vmin, vmax, H);
+        const inView = series.filter((p) => p.t >= vd.start && p.t <= vd.end);
+        const st = this._seriesStats(inView);
+        const showPeak =
+          st.peakTime !== null && st.peakTime >= vd.start && st.peakTime <= vd.end;
+        const peakX = showPeak ? this._scaleX(st.peakTime, vd).toFixed(2) : null;
+        const peakY = showPeak
+          ? (H - ((st.max - vmin) / (vmax - vmin || 1)) * H).toFixed(2)
+          : null;
+        const cid = `${id}-${d.key}`;
         return `
-          <path d="${path}" fill="none" stroke="${d.color}" stroke-width="1.6" vector-effect="non-scaling-stroke">
-            <title>${this._esc(d.label)} peak ${this._metricFormat(st.max, d.unit)} at ${this._fmtDateTime(st.peakTime)}</title>
-          </path>
+          <path d="${area}" fill="url(#fill-${cid})" stroke="none" opacity="0.16" />
+          <path d="${path}" fill="none" stroke="${d.color}" stroke-width="1.7" stroke-linejoin="round" vector-effect="non-scaling-stroke" filter="url(#glow-${id})" />
           ${
-            peakX !== null
-              ? `<circle cx="${peakX}" cy="${peakY}" r="1.5" fill="${d.color}"><title>${this._esc(d.label)} peak ${this._metricFormat(st.max, d.unit)}</title></circle>`
+            showPeak
+              ? `<circle cx="${peakX}" cy="${peakY}" r="1.7" fill="${d.color}"><title>${this._esc(d.label)} peak ${this._metricFormat(st.max, d.unit)} at ${this._fmtDateTime(st.peakTime)}</title></circle>`
               : ""
           }`;
       })
       .join("");
+    const svg = `<defs>${grads}<filter id="glow-${id}" x="-20%" y="-20%" width="140%" height="140%"><feGaussianBlur stdDeviation="0.7" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs>${this._gridlines(H)}${paths}`;
+    return { svg, vd, vmin, vmax };
+  }
+
+  _axisLabels(vd) {
+    const mid = vd.start + (vd.end - vd.start) / 2;
+    return `<span>${this._fmtDateTime(vd.start)}</span><span>${this._fmtDateTime(mid)}</span><span>${this._fmtDateTime(vd.end)}</span>`;
+  }
+
+  _yLabels(vmin, vmax, unit) {
+    return [vmax, (vmax + vmin) / 2, vmin]
+      .map((v) => `<span>${this._metricFormat(v, unit)}</span>`)
+      .join("");
+  }
+
+  _seriesChart(title, defs, options = {}) {
+    const id = `${this._reportTab}_${this._slug(title)}`;
+    this._chartDefs[id] = { defs, options, title };
+    const H = options.height || 66;
+    const inner = this._chartInner(id);
+    const zoomed = !!this._chartViews[id];
+    const firstUnit = (defs.find((d) => this._seriesEnabled[d.key] !== false) || defs[0] || {}).unit;
     const legend = `<div class="sdc-g-legend sdc-g-legend-buttons">${defs
       .map((d) => {
         const off = this._seriesEnabled[d.key] === false;
@@ -2046,16 +2218,158 @@ class SolarDashboardCard extends HTMLElement {
       })
       .join("")}</div>`;
     return `
-      <div class="sdc-g-panel">
-        <div class="sdc-g-h">${title}</div>
-        <svg class="sdc-g-line" viewBox="0 0 100 ${H}" preserveAspectRatio="none">
-          ${this._gridlines(H)}
-          ${paths}
-        </svg>
-        ${this._xAxis(options.domain)}
+      <div class="sdc-g-panel sdc-chart" data-chart="${id}">
+        <div class="sdc-g-h sdc-chart-head">
+          <span>${title}</span>
+          <span class="sdc-chart-tools">
+            <span class="sdc-chart-hint">scroll · zoom &nbsp;|&nbsp; drag · pan</span>
+            <button class="sdc-chart-reset" data-chart-reset="${id}" ${zoomed ? "" : "hidden"}>⟲ reset</button>
+          </span>
+        </div>
+        <div class="sdc-chart-plot" style="height:${options.pixelHeight || 150}px">
+          <div class="sdc-chart-y">${this._yLabels(inner.vmin, inner.vmax, firstUnit)}</div>
+          <svg class="sdc-g-line" viewBox="0 0 100 ${H}" preserveAspectRatio="none">${inner.svg}</svg>
+          <div class="sdc-chart-cross" hidden></div>
+          <div class="sdc-chart-tip" hidden></div>
+        </div>
+        <div class="sdc-g-x">${this._axisLabels(inner.vd)}</div>
         ${legend}
         ${summary}
       </div>`;
+  }
+
+  /* Re-render just one chart's plot/axes in place (used during zoom & pan). */
+  _redrawChart(id) {
+    const host = this._els.graphsEl;
+    const el = host && host.querySelector(`.sdc-chart[data-chart="${id}"]`);
+    const def = this._chartDefs[id];
+    if (!el || !def) return;
+    const inner = this._chartInner(id);
+    const svg = el.querySelector("svg.sdc-g-line");
+    if (svg) svg.innerHTML = inner.svg;
+    const y = el.querySelector(".sdc-chart-y");
+    const firstUnit = (def.defs.find((d) => this._seriesEnabled[d.key] !== false) || def.defs[0] || {}).unit;
+    if (y) y.innerHTML = this._yLabels(inner.vmin, inner.vmax, firstUnit);
+    const x = el.querySelector(".sdc-g-x");
+    if (x) x.innerHTML = this._axisLabels(inner.vd);
+    const reset = el.querySelector(".sdc-chart-reset");
+    if (reset) reset.hidden = !this._chartViews[id];
+  }
+
+  _chartTooltip(chartEl, clientX) {
+    const id = chartEl.dataset.chart;
+    const def = this._chartDefs[id];
+    if (!def) return;
+    // clear any other chart's overlays first
+    this._els.graphsEl
+      .querySelectorAll(".sdc-chart-cross, .sdc-chart-tip")
+      .forEach((n) => (n.hidden = true));
+    const plot = chartEl.querySelector(".sdc-chart-plot");
+    const rect = plot.getBoundingClientRect();
+    let frac = (clientX - rect.left) / rect.width;
+    frac = Math.max(0, Math.min(1, frac));
+    const vd = this._chartViewFor(id);
+    const t = vd.start + frac * (vd.end - vd.start);
+    const cross = chartEl.querySelector(".sdc-chart-cross");
+    if (cross) {
+      cross.hidden = false;
+      cross.style.left = `${(frac * 100).toFixed(2)}%`;
+    }
+    const tip = chartEl.querySelector(".sdc-chart-tip");
+    if (tip) {
+      const rows = def.defs
+        .filter((d) => this._seriesEnabled[d.key] !== false)
+        .map((d) => {
+          const v = this._valueAt(d.series, t);
+          return `<div><i style="background:${d.color}"></i><span>${this._esc(d.label)}</span><b>${this._metricFormat(v, d.unit)}</b></div>`;
+        })
+        .join("");
+      tip.hidden = false;
+      tip.innerHTML = `<div class="sdc-tip-t">${this._fmtDateTime(t)}</div>${rows}`;
+      if (frac > 0.6) {
+        tip.style.left = "auto";
+        tip.style.right = `${(100 - frac * 100).toFixed(2)}%`;
+      } else {
+        tip.style.right = "auto";
+        tip.style.left = `${(frac * 100).toFixed(2)}%`;
+      }
+    }
+  }
+
+  _hideChartOverlays() {
+    if (!this._els.graphsEl) return;
+    this._els.graphsEl
+      .querySelectorAll(".sdc-chart-cross, .sdc-chart-tip")
+      .forEach((n) => (n.hidden = true));
+  }
+
+  _onChartWheel(e) {
+    const plot = e.target.closest && e.target.closest(".sdc-chart-plot");
+    if (!plot) return; // only the plot rectangle zooms; legend/header scrolls the page
+    const chartEl = plot.closest(".sdc-chart");
+    if (!chartEl) return;
+    const id = chartEl.dataset.chart;
+    const def = this._chartDefs[id];
+    if (!def) return;
+    e.preventDefault();
+    const full = def.options.domain;
+    const vd = this._chartViewFor(id);
+    const rect = plot.getBoundingClientRect();
+    let frac = (e.clientX - rect.left) / rect.width;
+    frac = Math.max(0, Math.min(1, frac));
+    const focus = vd.start + frac * (vd.end - vd.start);
+    const factor = e.deltaY < 0 ? 0.82 : 1 / 0.82;
+    const newSpan = (vd.end - vd.start) * factor;
+    const view = this._clampView(full, focus - frac * newSpan, focus + (1 - frac) * newSpan);
+    if (view.end - view.start >= full.end - full.start - 1) delete this._chartViews[id];
+    else this._chartViews[id] = view;
+    this._redrawChart(id);
+    this._chartTooltip(chartEl, e.clientX);
+  }
+
+  _onChartPointerDown(e) {
+    const plot = e.target.closest && e.target.closest(".sdc-chart-plot");
+    if (!plot) return;
+    const chartEl = plot.closest(".sdc-chart");
+    if (!chartEl) return;
+    if (e.pointerType === "mouse" && e.button !== 0) return;
+    const id = chartEl.dataset.chart;
+    this._chartPan = {
+      id,
+      x: e.clientX,
+      w: plot.getBoundingClientRect().width || 1,
+      view: { ...this._chartViewFor(id) },
+    };
+  }
+
+  _onChartPointerMove(e) {
+    if (this._chartPan) {
+      const { id, x, w, view } = this._chartPan;
+      const def = this._chartDefs[id];
+      if (!def) return;
+      const dx = (e.clientX - x) / w;
+      const span = view.end - view.start;
+      const shift = -dx * span;
+      this._chartViews[id] = this._clampView(def.options.domain, view.start + shift, view.end + shift);
+      this._redrawChart(id);
+      return;
+    }
+    const plot = e.target.closest && e.target.closest(".sdc-chart-plot");
+    if (plot) this._chartTooltip(plot.closest(".sdc-chart"), e.clientX);
+    else this._hideChartOverlays();
+  }
+
+  _onChartPointerUp() {
+    this._chartPan = null;
+  }
+
+  _onChartDblClick(e) {
+    const plot = e.target.closest && e.target.closest(".sdc-chart-plot");
+    if (!plot) return;
+    const chartEl = plot.closest(".sdc-chart");
+    if (!chartEl) return;
+    delete this._chartViews[chartEl.dataset.chart];
+    this._redrawChart(chartEl.dataset.chart);
   }
 
   _metricFormat(value, unit, digits = 1) {
@@ -2069,16 +2383,38 @@ class SolarDashboardCard extends HTMLElement {
   _forecastPanel(g) {
     const f = g.forecast;
     if (!f.available) {
-      return `<div class="sdc-g-panel"><div class="sdc-g-h">Battery full estimate</div><div class="sdc-r-muted">${this._esc(f.message)}</div></div>`;
+      return `<div class="sdc-g-panel"><div class="sdc-g-h">Battery timing</div><div class="sdc-r-muted">${this._esc(f.message)}</div></div>`;
     }
-    return `<div class="sdc-g-panel">
-      <div class="sdc-g-h">Battery full estimate</div>
-      <div class="sdc-r-kpis">
-        ${this._tile("Remaining", this._fmtKwh(f.remainingKwh, 2), GRAPH_PALETTE.soc)}
-        ${this._tile("ETA", this._fmtDuration(f.etaHours), GRAPH_PALETTE.chg, f.fullAt ? `around ${this._fmtDateTime(f.fullAt)}` : "")}
-        ${this._tile("Forecast surplus", f.forecastSurplus === null ? "—" : this._fmtKwh(f.forecastSurplus, 2), GRAPH_PALETTE.pv)}
-        ${this._tile("Likely full", f.likelyFull ? "Yes" : "No", f.likelyFull ? GRAPH_PALETTE.exp : GRAPH_PALETTE.imp)}
-      </div>
+    const P = GRAPH_PALETTE;
+    const modeLabel =
+      { charging: "⚡ Charging", discharging: "🔻 Discharging", idle: "• Idle" }[f.mode] || f.mode;
+    const modeColor =
+      { charging: P.chg, discharging: P.dis, idle: "var(--sdc-muted)" }[f.mode] || "var(--sdc-muted)";
+    let tiles;
+    if (f.mode === "discharging") {
+      tiles =
+        this._tile("Usable now", this._fmtKwh(f.usableKwh, 2), P.soc, `above ${f.reserveSoc}% reserve`) +
+        this._tile("Draw", this._fmtPower(f.drawW), P.dis) +
+        this._tile("To reserve", this._fmtDuration(f.timeToReserve), P.imp, f.reserveAt ? `~${this._fmtDateTime(f.reserveAt)}` : "") +
+        this._tile("To empty", this._fmtDuration(f.timeToEmpty), P.dis, f.emptyAt ? `~${this._fmtDateTime(f.emptyAt)}` : "");
+    } else {
+      tiles =
+        this._tile("To full", this._fmtKwh(f.remainingKwh, 2), P.soc, `to ${f.target}%`) +
+        this._tile("Charge rate", this._fmtPower(f.chargeW), P.chg) +
+        this._tile("Full in", this._fmtDuration(f.chargeEtaHours), P.chg, f.fullAt ? `~${this._fmtDateTime(f.fullAt)}` : "") +
+        this._tile("Likely full today", f.likelyFull ? "Yes" : "No", f.likelyFull ? P.exp : P.imp, f.forecastSurplus !== null ? `surplus ${this._fmtKwh(f.forecastSurplus, 1)}` : "");
+    }
+    const soc = Math.max(0, Math.min(100, f.soc));
+    const bar = `<div class="sdc-soc-bar">
+      <div class="sdc-soc-fill" style="width:${soc}%;background:linear-gradient(90deg, ${P.dis}, ${P.soc})"></div>
+      <div class="sdc-soc-mark" style="left:${Math.max(0, Math.min(100, f.reserveSoc))}%" title="Reserve ${f.reserveSoc}%"></div>
+      <div class="sdc-soc-mark target" style="left:${Math.max(0, Math.min(100, f.target))}%" title="Target ${f.target}%"></div>
+      <span class="sdc-soc-label">${Math.round(f.soc)}%</span>
+    </div>`;
+    return `<div class="sdc-g-panel sdc-forecast">
+      <div class="sdc-g-h sdc-chart-head"><span>Battery timing</span><span class="sdc-forecast-mode" style="color:${modeColor}">${modeLabel}</span></div>
+      ${bar}
+      <div class="sdc-r-kpis">${tiles}</div>
       <div class="sdc-r-muted">${this._esc(f.message)}</div>
     </div>`;
   }
@@ -2086,11 +2422,21 @@ class SolarDashboardCard extends HTMLElement {
   _renderOverview(g) {
     const k = g.kwh;
     const p = g.previousKwh;
+    const f = g.forecast;
+    const P = GRAPH_PALETTE;
+    const autonomy =
+      f.available && g.stats.avgLoad && g.stats.avgLoad > 50
+        ? f.usableKwh / (g.stats.avgLoad / 1000)
+        : null;
     const tiles =
-      this._tile("Generated", this._fmtKwh(k.generated, 1), GRAPH_PALETTE.pv, p ? this._delta(k.generated, p.generated) : "") +
-      this._tile("Used", this._fmtKwh(k.used, 1), GRAPH_PALETTE.load, p ? this._delta(k.used, p.used) : "") +
-      this._tile("Self-sufficiency", `${Math.round(g.stats.selfSufficiency * 100)}%`, GRAPH_PALETTE.exp) +
-      this._tile("Net cost", this._fmtMoney(g.cost.net), g.cost.net <= 0 ? GRAPH_PALETTE.exp : GRAPH_PALETTE.imp);
+      this._tile("Generated", this._fmtKwh(k.generated, 1), P.pv, p ? this._delta(k.generated, p.generated) : "") +
+      this._tile("Used", this._fmtKwh(k.used, 1), P.load, p ? this._delta(k.used, p.used) : "") +
+      this._tile("Self-sufficiency", `${Math.round(g.stats.selfSufficiency * 100)}%`, P.exp) +
+      this._tile("Self-consumption", `${Math.round(g.stats.selfConsumption * 100)}%`, P.chg) +
+      this._tile("Net cost", this._fmtMoney(g.cost.net), g.cost.net <= 0 ? P.exp : P.imp) +
+      this._tile("Saved vs no-solar", this._fmtMoney(g.cost.savings), P.exp) +
+      this._tile("CO₂ avoided", `${g.stats.co2Avoided.toFixed(1)} kg`, P.dis) +
+      this._tile("Battery autonomy", autonomy === null ? "—" : this._fmtDuration(autonomy), P.soc, "at avg load");
     return `
       <div class="sdc-g-tiles">${tiles}</div>
       ${this._forecastPanel(g)}
@@ -2158,6 +2504,8 @@ class SolarDashboardCard extends HTMLElement {
         ${this._tile("Imported cost", this._fmtMoney(c.usage), GRAPH_PALETTE.imp)}
         ${this._tile("Feed-in credit", this._fmtMoney(c.credit), GRAPH_PALETTE.exp)}
         ${this._tile("Projected bill", c.projected === null ? "—" : this._fmtMoney(c.projected), GRAPH_PALETTE.chg)}
+        ${this._tile("Saved vs no-solar", this._fmtMoney(c.savings), GRAPH_PALETTE.exp)}
+        ${this._tile("Bill without solar", this._fmtMoney(c.noSolarBill), GRAPH_PALETTE.imp)}
       </div>
       <div class="sdc-g-panel">
         <div class="sdc-g-h">Cost breakdown</div>
@@ -2178,7 +2526,7 @@ class SolarDashboardCard extends HTMLElement {
         ${this._tile("Full time", this._fmtDuration(b.fullHours), GRAPH_PALETTE.soc, `>= ${b.fullSoc}%`)}
       </div>
       ${this._forecastPanel(g)}
-      ${this._seriesChart("Battery SoC", [{ key: "soc", label: "SoC", color: GRAPH_PALETTE.soc, series: g.series.soc, unit: "%" }], { domain: g.domain, vmin: 0, vmax: 100 })}
+      ${this._seriesChart("Battery SoC", [{ key: "soc", label: "SoC", color: GRAPH_PALETTE.soc, series: g.series.soc, unit: "%" }], { domain: g.domain, vmin: 0, vmax: 100, clamp: true })}
       ${this._seriesChart("Battery power", [
         { key: "charge", label: "Charge", color: GRAPH_PALETTE.chg, series: g.series.charge, unit: "W" },
         { key: "discharge", label: "Discharge", color: GRAPH_PALETTE.dis, series: g.series.discharge, unit: "W" },
@@ -2192,6 +2540,8 @@ class SolarDashboardCard extends HTMLElement {
         ${this._tile("Exported", this._fmtKwh(g.kwh.exported, 2), GRAPH_PALETTE.exp)}
         ${this._tile("Net grid", this._fmtKwh(g.kwh.imported - g.kwh.exported, 2), GRAPH_PALETTE.chg)}
         ${this._tile("Grid cost", this._fmtMoney(g.cost.usage - g.cost.credit), GRAPH_PALETTE.pv)}
+        ${this._tile("Grid-free time", this._fmtDuration(g.stats.gridFreeHours), GRAPH_PALETTE.exp, "zero import")}
+        ${this._tile("Peak load", this._fmtPower(g.stats.peakLoad), GRAPH_PALETTE.load, g.stats.peakLoadTime ? this._fmtDateTime(g.stats.peakLoadTime) : "")}
       </div>
       ${this._seriesChart("Grid power", [
         { key: "import", label: "Import", color: GRAPH_PALETTE.imp, series: g.series.import, unit: "W" },
@@ -2826,6 +3176,148 @@ class SolarDashboardCard extends HTMLElement {
         color: var(--sdc-muted);
       }
       .sdc-r-summary b { color: var(--sdc-fg); }
+
+      /* ===== futuristic report theme ===== */
+      .sdc-graphs {
+        --sdc-accent: #38e1ff;
+        --sdc-accent2: #7c5cff;
+        background:
+          radial-gradient(120% 80% at 50% -10%, rgba(56,225,255,0.06), transparent 60%);
+      }
+      .sdc-g-panel {
+        position: relative;
+        background:
+          linear-gradient(180deg, rgba(255,255,255,0.05), rgba(255,255,255,0.018));
+        border: 1px solid rgba(120,200,255,0.14);
+        box-shadow: inset 0 1px 0 rgba(255,255,255,0.05), 0 6px 22px -14px rgba(0,0,0,0.7);
+        backdrop-filter: blur(6px);
+        -webkit-backdrop-filter: blur(6px);
+        overflow: hidden;
+      }
+      .sdc-g-panel::before {
+        content:"";
+        position:absolute; top:0; left:0; right:0; height:1px;
+        background: linear-gradient(90deg, transparent, var(--sdc-accent), transparent);
+        opacity:0.5;
+      }
+      .sdc-g-h { color:#bcd7e6; }
+      .sdc-g-tile {
+        background: linear-gradient(180deg, rgba(255,255,255,0.06), rgba(255,255,255,0.02));
+        border: 1px solid rgba(120,200,255,0.12);
+      }
+      .sdc-g-tile-v {
+        font-family: ui-monospace, "SFMono-Regular", "Roboto Mono", Menlo, monospace;
+        font-variant-numeric: tabular-nums;
+        letter-spacing: 0.01em;
+        text-shadow: 0 0 14px currentColor;
+        filter: saturate(1.1);
+      }
+      .sdc-r-tab {
+        transition: all .18s ease;
+        backdrop-filter: blur(4px);
+      }
+      .sdc-r-tab:hover { color: var(--sdc-fg); border-color: rgba(120,200,255,0.35); }
+      .sdc-r-tab.active {
+        color:#eafaff;
+        border-color: rgba(56,225,255,0.7);
+        background: linear-gradient(180deg, rgba(56,225,255,0.22), rgba(124,92,255,0.16));
+        box-shadow: 0 0 16px -4px rgba(56,225,255,0.6);
+      }
+      .sdc-r-export:hover { border-color: rgba(56,225,255,0.5); }
+
+      /* chart HUD header */
+      .sdc-chart-head {
+        display:flex; align-items:center; justify-content:space-between; gap:8px;
+      }
+      .sdc-chart-tools { display:flex; align-items:center; gap:8px; }
+      .sdc-chart-hint {
+        font-size:0.56rem; letter-spacing:0.04em; color: rgba(160,200,225,0.55);
+        text-transform:none; white-space:nowrap;
+      }
+      .sdc-chart-reset {
+        font: inherit; font-size:0.6rem; cursor:pointer;
+        color:#cdefff; background: rgba(56,225,255,0.12);
+        border:1px solid rgba(56,225,255,0.4); border-radius:6px;
+        padding:2px 7px; line-height:1.2;
+      }
+      .sdc-chart-reset:hover { background: rgba(56,225,255,0.22); }
+
+      /* interactive plot area */
+      .sdc-chart-plot {
+        position: relative;
+        width: 100%;
+        margin-top: 2px;
+        box-sizing: border-box;
+        touch-action: pan-y;
+        cursor: crosshair;
+        overflow: hidden;
+        border-radius: 8px;
+      }
+      .sdc-chart-plot .sdc-g-line { width:100%; height:100%; }
+      /* y labels overlay the left edge; full-width SVG keeps cursor↔data aligned */
+      .sdc-chart-y {
+        position:absolute; left:0; top:0; bottom:0; width:54px;
+        display:flex; flex-direction:column; justify-content:space-between;
+        font-family: ui-monospace, monospace; font-variant-numeric: tabular-nums;
+        font-size:0.54rem; color: rgba(190,220,240,0.75);
+        text-align:left; padding:1px 0 1px 3px; pointer-events:none; z-index:2;
+        background: linear-gradient(90deg, rgba(14,20,28,0.55), transparent);
+      }
+      .sdc-chart-y span { text-shadow: 0 0 4px rgba(0,0,0,0.9); }
+      .sdc-chart-cross {
+        position:absolute; top:0; bottom:0; width:1px;
+        background: linear-gradient(180deg, rgba(56,225,255,0.0), rgba(56,225,255,0.8), rgba(56,225,255,0.0));
+        box-shadow: 0 0 8px rgba(56,225,255,0.7);
+        pointer-events:none; transform: translateX(-0.5px);
+      }
+      .sdc-chart-tip {
+        position:absolute; top:6px; transform: translateX(8px);
+        min-width:120px; max-width:200px;
+        background: rgba(14,20,28,0.92);
+        border:1px solid rgba(120,200,255,0.3);
+        border-radius:8px; padding:6px 8px;
+        box-shadow: 0 8px 24px -8px rgba(0,0,0,0.8), 0 0 0 1px rgba(56,225,255,0.08) inset;
+        backdrop-filter: blur(8px);
+        font-size:0.66rem; pointer-events:none; z-index:5;
+      }
+      .sdc-chart-tip[style*="right"] { transform: translateX(-8px); }
+      .sdc-tip-t {
+        font-family: ui-monospace, monospace; font-size:0.6rem;
+        color:#9fd6ee; margin-bottom:4px; white-space:nowrap;
+      }
+      .sdc-chart-tip > div {
+        display:flex; align-items:center; gap:5px; line-height:1.5; white-space:nowrap;
+      }
+      .sdc-chart-tip i { width:8px; height:8px; border-radius:2px; flex:0 0 auto; }
+      .sdc-chart-tip span { color: var(--sdc-muted); margin-right:auto; }
+      .sdc-chart-tip b {
+        font-family: ui-monospace, monospace; font-variant-numeric: tabular-nums; color:#fff;
+      }
+
+      /* battery SoC bar with reserve / target markers */
+      .sdc-forecast-mode {
+        font-size:0.7rem; font-weight:800; letter-spacing:0.03em; text-transform:none;
+        text-shadow: 0 0 12px currentColor;
+      }
+      .sdc-soc-bar {
+        position:relative; height:18px; border-radius:9px; margin:2px 0 12px;
+        background: rgba(255,255,255,0.07);
+        border:1px solid rgba(120,200,255,0.16); overflow:hidden;
+      }
+      .sdc-soc-fill {
+        height:100%; border-radius:9px 0 0 9px;
+        box-shadow: 0 0 16px -2px rgba(56,225,255,0.6); transition: width .6s ease;
+      }
+      .sdc-soc-mark {
+        position:absolute; top:-2px; bottom:-2px; width:2px;
+        background: rgba(255,255,255,0.65); transform: translateX(-1px);
+      }
+      .sdc-soc-mark.target { background: #ffd34d; box-shadow:0 0 6px #ffd34d; }
+      .sdc-soc-label {
+        position:absolute; right:7px; top:50%; transform: translateY(-50%);
+        font-family: ui-monospace, monospace; font-size:0.66rem; font-weight:800;
+        color:#fff; text-shadow:0 0 6px rgba(0,0,0,0.9);
+      }
 
       /* Responsive */
       @media (max-width: 600px) {

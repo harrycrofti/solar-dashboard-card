@@ -210,11 +210,20 @@ It has selectable ranges (`today`, `yesterday`, `7 days`, `30 days`,
 `billing month`, `billing quarter`) and tabs for Overview, Energy, Cost,
 Battery, Grid, Solar/PV, Inverter, Events and custom Metrics.
 
-- **Interactive charts** — click legend items to show/hide series; peak markers
-  include hover tooltips; every chart includes average/max summaries.
+- **Zoomable, interactive charts** — **scroll to zoom**, **drag to pan**, and
+  **double-click (or ⟲ reset) to zoom out**. A live crosshair tooltip shows every
+  visible series' value at the cursor, and the Y-axis auto-rescales to the zoomed
+  window so fine detail is visible. Click legend items to show/hide series.
+- **Battery timing** — live **time-to-full** while charging (rate + estimated
+  clock time) and **time-to-reserve / time-to-empty** while discharging, with a
+  SoC bar marking your reserve and full-charge targets. Auto-switches on the
+  measured charge/discharge state.
+- **Headline metrics** — self-sufficiency, self-consumption, **CO₂ avoided**,
+  **$ saved vs. no-solar**, **battery autonomy** (runtime at average load) and
+  **grid-free time** (hours with zero import).
 - **CSV export** — downloads the selected range's raw report series.
 - **Cost reporting** — import cost, feed-in credit, supply charge, net cost,
-  previous-range comparison and billing-period projection.
+  previous-range comparison, billing-period projection, savings vs. no-solar.
 - **Battery reporting** — charge/discharge kWh, grid vs solar charging estimate,
   cycle estimate, efficiency, min/max SoC, time below reserve and time full.
 - **Forecast layer** — optional solar/load forecast sensors estimate whether the
@@ -321,6 +330,7 @@ metrics:
 | `battery_reserve_soc` | number | `20` | Reserve threshold used for "time below reserve". |
 | `battery_full_soc` | number | `100` | Target SoC used for "time full" and battery-full ETA. |
 | `battery_charge_efficiency` | number | `0.92` | Forecast conversion factor for solar surplus into stored battery energy. |
+| `co2_factor_kg_per_kwh` | number | `0.79` | Grid emissions factor used for the **CO₂ avoided** metric (kg CO₂ per kWh). Default ≈ Australian grid average; set your region's value. |
 | `solar_forecast_remaining_sensor` | entity | _(none)_ | Optional kWh remaining from solar forecast; used for battery-full ETA. |
 | `load_forecast_remaining_sensor` | entity | _(none)_ | Optional kWh remaining load forecast; subtracted from solar forecast for surplus. |
 | `solar_inverter_ac_capacity_w` | number | _(none)_ | Inverter AC capacity; used to flag time spent near clipping. |
