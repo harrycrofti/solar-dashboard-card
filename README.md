@@ -1,5 +1,7 @@
 # 🔆 Solar Dashboard Card
 
+![Solar Dashboard Card](examples/screenshot.png)
+
 A responsive, production-ready **custom Lovelace card** for Home Assistant that
 renders a solar-powered home as a live visualization: a weather/day-night aware
 house image, clickable node bubbles, animated energy-flow lines, a stats strip,
