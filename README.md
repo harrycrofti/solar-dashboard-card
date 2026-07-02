@@ -139,6 +139,59 @@ autocomplete), tariffs/behaviour, node positions and image paths.
 
 ---
 
+## Time-of-use (TOU) tariffs
+
+Set `tariff_mode: tou` to bill imports by **time of day** instead of one flat
+rate. Each band has a `rate` ($/kWh) and a `windows` string of 24-hour ranges:
+
+```yaml
+tariff_mode: tou
+tou:
+  peak:
+    rate: 0.45
+    windows: "15:00-21:00"
+  shoulder:
+    rate: 0.30
+    windows: "07:00-15:00,21:00-22:00"   # comma-separate multiple windows
+  offpeak:
+    rate: 0.20
+    windows: "22:00-07:00"               # a range may wrap past midnight
+  free:
+    enabled: true
+    windows: "11:00-14:00"               # billed at $0 while enabled
+```
+
+**Window rules**
+
+- Format is `HH:MM-HH:MM` (24-hour). Comma-separate multiple windows for one
+  band (e.g. a morning **and** an evening peak).
+- A range whose end is earlier than its start **wraps past midnight** —
+  `22:00-06:00` means 10pm through 6am.
+- **Off-peak is the catch-all**: any time not matched by free/peak/shoulder is
+  billed at the off-peak rate, so you never have to cover all 24 hours exactly.
+  (You may still list off-peak `windows` for clarity — they're optional.)
+- **Precedence** when windows overlap: `free` → `peak` → `shoulder` →
+  `off-peak`. So a free window at 11am–2pm wins even if it also falls in
+  shoulder.
+- **Export/feed-in stays a single flat rate** (`export_tariff`) — that matches
+  how most feed-in tariffs are billed.
+
+**Where TOU is exact vs. approximate**
+
+- The **reporting panel → Cost tab** splits your real imported-kWh *history*
+  into bands by the actual local time each interval occurred, then charges each
+  band its rate. This is an exact by-time cost and shows a per-band breakdown
+  (Peak / Shoulder / Off-peak / Free).
+- The **always-on cost card** (monthly/quarterly) only sees a cumulative meter
+  total or instantaneous power — it has no time-of-day breakdown — so in TOU
+  mode it applies a **duration-weighted average import rate** and is labelled
+  `TOU · AVG`. For the precise by-time figure, read the report's Cost tab for
+  the `Billing month` / `Billing quarter` range.
+
+Leave `tariff_mode: single` (the default) to keep the flat `import_tariff`.
+
+---
+
 ## Cost cards — monthly / quarterly + billing dates
 
 Choose which cost card(s) appear with `cost_period: quarter | month | both`.
@@ -299,8 +352,11 @@ metrics:
 | `sunset_sensor` | entity | `sensor.raceview_astronomical_sunset_time_0` | ISO timestamp of sunset. |
 | `day_cycle_boolean` | entity | `input_boolean.energy_house_image_day_cycle` | When `off`, night switching is disabled (always day image). |
 | `details_overlay_boolean` | entity | `input_boolean.energy_vision_details` | When `on`, shows the extended details grid. |
-| `import_tariff` | number | `0.24` | $ per kWh imported. |
-| `export_tariff` | number | `0.40` | $ per kWh exported (feed-in). |
+| `tariff_mode` | string | `single` | `single` (flat `import_tariff`) or `tou` (time-of-use bands — see [Time-of-use tariffs](#time-of-use-tou-tariffs)). |
+| `import_tariff` | number | `0.24` | $ per kWh imported (used in `single` mode). |
+| `export_tariff` | number | `0.40` | $ per kWh exported (feed-in). Always a single flat rate, even in TOU mode. |
+| `tou.peak` / `tou.shoulder` / `tou.offpeak` | map | _(see TOU section)_ | Each has `rate` ($/kWh) and `windows` (`"HH:MM-HH:MM"`, comma-separated, may wrap past midnight). Off-peak is the catch-all for any unmatched time. |
+| `tou.free` | map | `{enabled:false, windows:"11:00-14:00"}` | `enabled` + `windows`; when enabled, those times are billed at $0 and override all other bands. |
 | `daily_connection_fee` | number | `0` | Fixed grid supply charge in $ per day. Added to every cost card as `fee × days in the period` (applies to both the accurate and estimated figures). |
 | `cost_period` | string | `quarter` | Which cost card(s) to show: `quarter`, `month`, or `both`. |
 | `month_start_day` | number | `1` | Day of month the billing month starts (used for the monthly day-count). |

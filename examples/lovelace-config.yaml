@@ -33,8 +33,9 @@ day_cycle_boolean: input_boolean.energy_house_image_day_cycle   # off = always d
 details_overlay_boolean: input_boolean.energy_vision_details    # on = show details grid
 
 # --- Cost cards -------------------------------------------------------------
-import_tariff: 0.24
-export_tariff: 0.40
+tariff_mode: single            # single | tou  (see the TOU block below for time-of-use)
+import_tariff: 0.24            # used in single mode
+export_tariff: 0.40            # feed-in credit — always a single flat rate
 daily_connection_fee: 0.98     # $/day fixed grid supply charge (× days in the period)
 cost_period: both              # quarter | month | both
 month_start_day: 1             # billing month starts on this day
@@ -45,6 +46,31 @@ quarter_days: 91               # legacy fallback only
 # export_energy_month_sensor: sensor.grid_export_energy_month
 # import_energy_quarter_sensor: sensor.grid_import_energy_quarter
 # export_energy_quarter_sensor: sensor.grid_export_energy_quarter
+
+# --- Time-of-use tariff -----------------------------------------------------
+# Only used when tariff_mode: tou (above). Each band has a $/kWh rate and a
+# "windows" string of 24h ranges: "HH:MM-HH:MM", comma-separated for multiple
+# windows, and a range may wrap past midnight (e.g. 22:00-06:00).
+#   * Off-peak is the CATCH-ALL — any time not matched by free/peak/shoulder is
+#     billed at the off-peak rate, so you don't have to cover all 24h exactly.
+#   * Free (when enabled) overrides every band at $0 during its windows.
+# The report's Cost tab splits your real imported-kWh history into these bands
+# by the actual time it happened, so its figure is exact. The always-on cost
+# card has no time breakdown, so it shows a duration-weighted AVG rate instead.
+# tariff_mode: tou
+# tou:
+#   peak:
+#     rate: 0.45
+#     windows: "15:00-21:00"
+#   shoulder:
+#     rate: 0.30
+#     windows: "07:00-15:00,21:00-22:00"
+#   offpeak:
+#     rate: 0.20
+#     windows: "22:00-07:00"     # optional — off-peak is the catch-all anyway
+#   free:
+#     enabled: true
+#     windows: "11:00-14:00"     # billed at $0 while enabled
 
 # --- Flow colours -----------------------------------------------------------
 # Per-direction flow-dot colours (each unset key uses its built-in default):

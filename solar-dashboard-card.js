@@ -78,8 +78,21 @@ const DEFAULTS = {
   title: "",
 
   // Tariffs / cost estimate
-  import_tariff: 0.24,
-  export_tariff: 0.4,
+  tariff_mode: "single", // "single" (flat import_tariff) | "tou" (time-of-use bands)
+  import_tariff: 0.24, // used in single mode (and as a fallback)
+  export_tariff: 0.4, // feed-in credit — always a single flat rate
+  // Time-of-use import tariff. Each band has a $/kWh rate and a "windows"
+  // string of "HH:MM-HH:MM" ranges (comma-separated; a range may wrap past
+  // midnight, e.g. "22:00-06:00"). Off-peak is the CATCH-ALL: any time not
+  // matched by free/peak/shoulder is billed at the off-peak rate, so you never
+  // have to cover the whole 24h exactly. Free (when enabled) overrides every
+  // other band at $0 during its windows.
+  tou: {
+    peak: { rate: 0.45, windows: "" },
+    shoulder: { rate: 0.3, windows: "" },
+    offpeak: { rate: 0.2, windows: "" }, // fallback for any uncovered time
+    free: { enabled: false, windows: "11:00-14:00" }, // $0 usage window
+  },
   daily_connection_fee: 0, // $/day fixed grid supply charge (added to every period)
   cost_period: "quarter", // "quarter" | "month" | "both"
   month_start_day: 1, // day-of-month the billing month starts (1-31)
@@ -264,6 +277,14 @@ class SolarDashboardCard extends HTMLElement {
       grid: { ...DEFAULTS.nodes.grid, ...((config.nodes || {}).grid || {}) },
     };
     merged.home_glow = { ...DEFAULTS.home_glow, ...(config.home_glow || {}) };
+    // Per-band deep-merge so a user only needs to set the keys they change.
+    const utou = config.tou || {};
+    merged.tou = {
+      peak: { ...DEFAULTS.tou.peak, ...(utou.peak || {}) },
+      shoulder: { ...DEFAULTS.tou.shoulder, ...(utou.shoulder || {}) },
+      offpeak: { ...DEFAULTS.tou.offpeak, ...(utou.offpeak || {}) },
+      free: { ...DEFAULTS.tou.free, ...(utou.free || {}) },
+    };
     merged.flow_colors = { ...(config.flow_colors || {}) };
     merged.node_colors = { ...(config.node_colors || {}) };
     merged.metrics = this._normaliseMetrics(config.metrics || []);
@@ -1194,7 +1215,11 @@ class SolarDashboardCard extends HTMLElement {
     const els = this._costEls && this._costEls[period];
     if (!els) return;
     const C = this._config;
-    const impTariff = Number(C.import_tariff);
+    const isTou = this._isTou();
+    // In TOU mode the card (which has no time-of-day breakdown of energy) uses
+    // a duration-weighted average import rate; the report's Cost tab gives the
+    // exact per-band figure. Single mode uses the flat import tariff.
+    const impTariff = isTou ? this._touAvgImportRate() : Number(C.import_tariff);
     const expTariff = Number(C.export_tariff);
     const dailyFee = Number(C.daily_connection_fee) || 0;
     // Days so far in the current billing period (start day → today, inclusive).
@@ -1202,6 +1227,9 @@ class SolarDashboardCard extends HTMLElement {
     const connection = dailyFee * days;
     const feeNote = dailyFee
       ? ` · Supply ${days}d @ $${dailyFee}/day = ${this._fmtMoney(connection)}`
+      : "";
+    const rateNote = isTou
+      ? ` (TOU avg $${impTariff.toFixed(3)}/kWh — see report Cost tab for by-time)`
       : "";
     const [impSensor, expSensor] = this._energySensorsFor(period);
     const impKwh = impSensor ? this._energyKwh(impSensor) : null;
@@ -1211,14 +1239,14 @@ class SolarDashboardCard extends HTMLElement {
       // Accurate: from real energy totals (utility_meter etc.).
       const cost =
         (impKwh || 0) * impTariff - (expKwh || 0) * expTariff + connection;
-      els.tag.textContent = "FROM ENERGY";
+      els.tag.textContent = isTou ? "TOU · AVG" : "FROM ENERGY";
       els.tag.className = "sdc-cost-tag actual";
       els.value.textContent = this._fmtMoney(cost);
       els.foot.textContent = `Import ${(impKwh || 0).toFixed(
         1
-      )} kWh @ $${impTariff} · Export ${(expKwh || 0).toFixed(
+      )} kWh @ $${impTariff.toFixed(isTou ? 3 : 2)} · Export ${(expKwh || 0).toFixed(
         1
-      )} kWh @ $${expTariff}${feeNote}`;
+      )} kWh @ $${expTariff}${feeNote}${rateNote}`;
     } else {
       // Rough projection from instantaneous power (clearly flagged).
       const impKw = importW !== null ? Math.max(0, importW) / 1000 : 0;
@@ -1227,10 +1255,10 @@ class SolarDashboardCard extends HTMLElement {
         impKw * 24 * days * impTariff -
         expKw * 24 * days * expTariff +
         connection;
-      els.tag.textContent = "ESTIMATE";
+      els.tag.textContent = isTou ? "ESTIMATE · TOU" : "ESTIMATE";
       els.tag.className = "sdc-cost-tag";
       els.value.textContent = this._fmtMoney(cost);
-      els.foot.textContent = `Rough projection of current power over the ${days} days so far this ${period}${feeNote}. Configure ${period} energy sensors (kWh) for accuracy.`;
+      els.foot.textContent = `Rough projection of current power over the ${days} days so far this ${period}${feeNote}${rateNote}. Configure ${period} energy sensors (kWh) for accuracy.`;
     }
   }
 
@@ -1487,6 +1515,124 @@ class SolarDashboardCard extends HTMLElement {
     return wh / 1000;
   }
 
+  /* ------------------------------------------------------------------ *
+   * Time-of-use (TOU) tariff helpers
+   * ------------------------------------------------------------------ */
+
+  /** True when the card is configured for a time-of-use import tariff. */
+  _isTou() {
+    return String(this._config.tariff_mode || "single").toLowerCase() === "tou";
+  }
+
+  /**
+   * Parse "HH:MM-HH:MM, HH:MM-HH:MM" into [{s,e}] minute-of-day ranges.
+   * A range whose end is <= its start is treated as wrapping past midnight
+   * and split into two ranges. Invalid segments are ignored.
+   */
+  _parseTouWindows(str) {
+    const out = [];
+    String(str || "")
+      .split(",")
+      .forEach((seg) => {
+        const m = seg
+          .trim()
+          .match(/^(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})$/);
+        if (!m) return;
+        const s = (+m[1]) * 60 + +m[2];
+        const e = (+m[3]) * 60 + +m[4];
+        if (s < 0 || s > 1440 || e < 0 || e > 1440 || s === e) return;
+        if (e > s) out.push({ s, e });
+        else {
+          out.push({ s, e: 1440 }); // start → midnight
+          out.push({ s: 0, e }); // midnight → end
+        }
+      });
+    return out;
+  }
+
+  _touWindowsContain(mins, ranges) {
+    return ranges.some((r) => mins >= r.s && mins < r.e);
+  }
+
+  /**
+   * Build a 1440-entry (per-minute-of-day) lookup of {band, rate}. Precedence:
+   * free (if enabled) > peak > shoulder > off-peak (the catch-all fallback).
+   */
+  _touMinuteTable() {
+    const t = this._config.tou || {};
+    const free = t.free || {};
+    const freeOn = !!free.enabled;
+    const wFree = freeOn ? this._parseTouWindows(free.windows) : [];
+    const wPeak = this._parseTouWindows((t.peak || {}).windows);
+    const wShoulder = this._parseTouWindows((t.shoulder || {}).windows);
+    const rPeak = Number((t.peak || {}).rate) || 0;
+    const rShoulder = Number((t.shoulder || {}).rate) || 0;
+    const rOff = Number((t.offpeak || {}).rate) || 0;
+    const table = new Array(1440);
+    for (let m = 0; m < 1440; m++) {
+      if (freeOn && this._touWindowsContain(m, wFree))
+        table[m] = { band: "free", rate: 0 };
+      else if (this._touWindowsContain(m, wPeak))
+        table[m] = { band: "peak", rate: rPeak };
+      else if (this._touWindowsContain(m, wShoulder))
+        table[m] = { band: "shoulder", rate: rShoulder };
+      else table[m] = { band: "offpeak", rate: rOff }; // catch-all
+    }
+    return table;
+  }
+
+  /**
+   * Duration-weighted average import rate across a full day ($/kWh). Used by
+   * the always-on cost card, which has no time-of-day breakdown of energy.
+   */
+  _touAvgImportRate() {
+    const table = this._touMinuteTable();
+    let sum = 0;
+    for (let m = 0; m < 1440; m++) sum += table[m].rate;
+    return sum / 1440;
+  }
+
+  /** Current band rates as configured (free is always 0). */
+  _touRates() {
+    const t = this._config.tou || {};
+    return {
+      peak: Number((t.peak || {}).rate) || 0,
+      shoulder: Number((t.shoulder || {}).rate) || 0,
+      offpeak: Number((t.offpeak || {}).rate) || 0,
+      free: 0,
+    };
+  }
+
+  /**
+   * Integrate a power(W) series into per-band kWh using the local time each
+   * interval occurred. Returns {peak, shoulder, offpeak, free} in kWh.
+   */
+  _integrateByBand(series) {
+    const bands = { peak: 0, shoulder: 0, offpeak: 0, free: 0 };
+    if (series && series.length > 1) {
+      const table = this._touMinuteTable();
+      for (let i = 1; i < series.length; i++) {
+        const dtH = (series[i].t - series[i - 1].t) / 3600000;
+        if (dtH <= 0) continue;
+        const wh = ((series[i].v + series[i - 1].v) / 2) * dtH;
+        const mid = new Date((series[i].t + series[i - 1].t) / 2);
+        const mins = mid.getHours() * 60 + mid.getMinutes();
+        bands[table[mins].band] += wh;
+      }
+    }
+    for (const k in bands) bands[k] /= 1000; // Wh → kWh
+    return bands;
+  }
+
+  /** Total TOU import cost from per-band kWh × per-band rate. */
+  _touCost(bandKwh, rates) {
+    return (
+      (bandKwh.peak || 0) * rates.peak +
+      (bandKwh.shoulder || 0) * rates.shoulder +
+      (bandKwh.offpeak || 0) * rates.offpeak
+    ); // free band is $0
+  }
+
   _coreKwh(series, useTodayOverrides) {
     const C = this._config;
     let generated = this._integrate(series.solar);
@@ -1554,7 +1700,7 @@ class SolarDashboardCard extends HTMLElement {
       },
       stats,
       battery: this._batteryStats(series, kwh),
-      cost: this._costReport(kwh, previousKwh, win),
+      cost: this._costReport(kwh, previousKwh, win, series, previousSeries),
       solar: this._solarStats(series, kwh),
       inverter: this._inverterReport(),
       forecast: this._batteryForecast(),
@@ -1659,9 +1805,9 @@ class SolarDashboardCard extends HTMLElement {
     };
   }
 
-  _costReport(kwh, previousKwh, win) {
+  _costReport(kwh, previousKwh, win, series, previousSeries) {
     const C = this._config;
-    const importTariff = Number(C.import_tariff) || 0;
+    const isTou = this._isTou();
     const exportTariff = Number(C.export_tariff) || 0;
     const dailyFee = Number(C.daily_connection_fee) || 0;
     let days = Math.max(
@@ -1671,19 +1817,45 @@ class SolarDashboardCard extends HTMLElement {
     if (win.range === "billing_month") days = this._periodElapsedDays("month");
     if (win.range === "billing_quarter")
       days = this._periodElapsedDays("quarter");
-    const usage = kwh.imported * importTariff;
+
+    // Import cost. In TOU mode we split the imported-power history into bands by
+    // the actual local time each interval occurred — this is exact by-time cost.
+    // In single mode it's a flat rate on total imported kWh.
+    let usage;
+    let tou = null;
+    let noSolarImport = 0;
+    const importTariff = isTou
+      ? this._touAvgImportRate()
+      : Number(C.import_tariff) || 0;
+    if (isTou) {
+      const rates = this._touRates();
+      const importByBand = this._integrateByBand((series || {}).import);
+      // No-solar scenario bills the whole load at TOU rates by its own timing.
+      const loadByBand = this._integrateByBand((series || {}).load);
+      usage = this._touCost(importByBand, rates);
+      tou = { rates, importByBand };
+      noSolarImport = this._touCost(loadByBand, rates);
+    } else {
+      usage = kwh.imported * importTariff;
+    }
     const credit = kwh.exported * exportTariff;
     const supply = dailyFee * days;
     const net = usage - credit + supply;
     // what the bill would have been with no solar/battery (import the whole load, no export credit)
-    const noSolarBill = kwh.used * importTariff + supply;
+    const noSolarBill =
+      (isTou ? noSolarImport : kwh.used * importTariff) + supply;
     const savings = noSolarBill - net;
-    const previous =
-      previousKwh && this._config.report_show_previous !== false
-        ? previousKwh.imported * importTariff -
-          previousKwh.exported * exportTariff +
-          dailyFee * days
-        : null;
+    let previous = null;
+    if (previousKwh && this._config.report_show_previous !== false) {
+      const prevUsage =
+        isTou && previousSeries
+          ? this._touCost(
+              this._integrateByBand(previousSeries.import),
+              this._touRates()
+            )
+          : previousKwh.imported * importTariff;
+      previous = prevUsage - previousKwh.exported * exportTariff + dailyFee * days;
+    }
     let projected = null;
     if (win.range === "billing_month") {
       projected = (net / Math.max(1, this._periodElapsedDays("month"))) * this._periodDays("month");
@@ -1692,7 +1864,7 @@ class SolarDashboardCard extends HTMLElement {
         (net / Math.max(1, this._periodElapsedDays("quarter"))) *
         this._periodDays("quarter");
     }
-    return { importTariff, exportTariff, dailyFee, days, usage, credit, supply, net, previous, projected, noSolarBill, savings };
+    return { importTariff, exportTariff, dailyFee, days, usage, credit, supply, net, previous, projected, noSolarBill, savings, tou };
   }
 
   _solarStats(series, kwh) {
@@ -2492,12 +2664,39 @@ class SolarDashboardCard extends HTMLElement {
 
   _renderCost(g) {
     const c = g.cost;
-    const rows = [
-      ["Imported", this._fmtKwh(g.kwh.imported, 2), `@ $${c.importTariff}/kWh`, this._fmtMoney(c.usage)],
-      ["Exported", this._fmtKwh(g.kwh.exported, 2), `@ $${c.exportTariff}/kWh`, "-" + this._fmtMoney(c.credit)],
-      ["Supply", `${c.days.toFixed(1)} days`, `@ $${c.dailyFee}/day`, this._fmtMoney(c.supply)],
-      ["Net", "", "", this._fmtMoney(c.net)],
-    ];
+    let rows;
+    if (c.tou) {
+      // Per-band import breakdown (only bands with usage or a set rate shown).
+      const b = c.tou.importByBand;
+      const r = c.tou.rates;
+      const labels = {
+        peak: "Import · Peak",
+        shoulder: "Import · Shoulder",
+        offpeak: "Import · Off-peak",
+        free: "Import · Free",
+      };
+      rows = ["peak", "shoulder", "offpeak", "free"]
+        .filter((k) => (b[k] || 0) > 0.0005 || (k !== "free" && r[k] > 0))
+        .map((k) => [
+          labels[k],
+          this._fmtKwh(b[k] || 0, 2),
+          `@ $${(r[k] || 0).toFixed(k === "free" ? 0 : 3)}/kWh`,
+          this._fmtMoney((b[k] || 0) * (r[k] || 0)),
+        ]);
+      rows.push(
+        ["Imported total", this._fmtKwh(g.kwh.imported, 2), "", this._fmtMoney(c.usage)],
+        ["Exported", this._fmtKwh(g.kwh.exported, 2), `@ $${c.exportTariff}/kWh`, "-" + this._fmtMoney(c.credit)],
+        ["Supply", `${c.days.toFixed(1)} days`, `@ $${c.dailyFee}/day`, this._fmtMoney(c.supply)],
+        ["Net", "", "", this._fmtMoney(c.net)]
+      );
+    } else {
+      rows = [
+        ["Imported", this._fmtKwh(g.kwh.imported, 2), `@ $${c.importTariff}/kWh`, this._fmtMoney(c.usage)],
+        ["Exported", this._fmtKwh(g.kwh.exported, 2), `@ $${c.exportTariff}/kWh`, "-" + this._fmtMoney(c.credit)],
+        ["Supply", `${c.days.toFixed(1)} days`, `@ $${c.dailyFee}/day`, this._fmtMoney(c.supply)],
+        ["Net", "", "", this._fmtMoney(c.net)],
+      ];
+    }
     return `
       <div class="sdc-r-kpis">
         ${this._tile("Net cost", this._fmtMoney(c.net), c.net <= 0 ? GRAPH_PALETTE.exp : GRAPH_PALETTE.imp, c.previous !== null ? this._delta(c.net, c.previous, (v) => this._fmtMoney(v)) : "")}
@@ -2508,7 +2707,7 @@ class SolarDashboardCard extends HTMLElement {
         ${this._tile("Bill without solar", this._fmtMoney(c.noSolarBill), GRAPH_PALETTE.imp)}
       </div>
       <div class="sdc-g-panel">
-        <div class="sdc-g-h">Cost breakdown</div>
+        <div class="sdc-g-h">Cost breakdown${c.tou ? " · time-of-use" : ""}</div>
         <div class="sdc-r-table">${rows.map((r) => `<div><span>${r[0]}</span><span>${r[1]}</span><span>${r[2]}</span><b>${r[3]}</b></div>`).join("")}</div>
       </div>`;
   }
@@ -3518,6 +3717,18 @@ class SolarDashboardCardEditor extends HTMLElement {
     this._emit();
   }
 
+  _setTou(band, field, value) {
+    if (!this._config.tou) this._config.tou = {};
+    if (!this._config.tou[band]) this._config.tou[band] = {};
+    if (value === "" || value === undefined || value === null)
+      delete this._config.tou[band][field];
+    else this._config.tou[band][field] = value;
+    if (Object.keys(this._config.tou[band]).length === 0)
+      delete this._config.tou[band];
+    if (Object.keys(this._config.tou).length === 0) delete this._config.tou;
+    this._emit();
+  }
+
   _defaults() {
     return DEFAULTS;
   }
@@ -3649,6 +3860,7 @@ class SolarDashboardCardEditor extends HTMLElement {
       <div class="sdc-sec">
         <div class="sdc-sec-h">Cost period</div>
         <div class="sdc-grid">
+          ${selectInput("tariff_mode", "Tariff mode", ["single", "tou"])}
           ${selectInput("cost_period", "Show", ["quarter", "month", "both"])}
           ${numberInput("month_start_day", "Month start day (1-31)", 1)}
           ${textInput(
@@ -3656,6 +3868,42 @@ class SolarDashboardCardEditor extends HTMLElement {
             "Quarter start (YYYY-MM-DD or MM-DD)",
             "01-01"
           )}
+        </div>
+      </div>`;
+
+    // Time-of-use tariff editor (only used when Tariff mode = tou).
+    const tou = this._config.tou || {};
+    const touBand = (band) => tou[band] || {};
+    const touRate = (band, ph) => `
+      <label class="sdc-f">
+        <span>${band[0].toUpperCase() + band.slice(1)} rate ($/kWh)</span>
+        <input type="number" step="0.001" data-tou="${band}" data-toufield="rate"
+               value="${touBand(band).rate ?? ""}" placeholder="${ph}" />
+      </label>`;
+    const touWindows = (band, ph) => `
+      <label class="sdc-f">
+        <span>${band[0].toUpperCase() + band.slice(1)} times</span>
+        <input type="text" data-tou="${band}" data-toufield="windows"
+               value="${touBand(band).windows ?? ""}" placeholder="${ph}" />
+      </label>`;
+    const touSection = `
+      <div class="sdc-sec">
+        <div class="sdc-sec-h">Time-of-use tariff (when Tariff mode = tou)</div>
+        <div class="sdc-note" style="margin:0 0 8px;">Times are 24h ranges like <b>15:00-21:00</b>, comma-separated for multiple windows; a range may wrap past midnight (<b>22:00-06:00</b>). Off-peak is the catch-all for any time not matched. Free (if enabled) overrides everything at $0.</div>
+        <div class="sdc-grid">
+          ${touRate("peak", d.tou.peak.rate)}
+          ${touWindows("peak", "e.g. 15:00-21:00")}
+          ${touRate("shoulder", d.tou.shoulder.rate)}
+          ${touWindows("shoulder", "e.g. 07:00-15:00,21:00-22:00")}
+          ${touRate("offpeak", d.tou.offpeak.rate)}
+          ${touWindows("offpeak", "(remaining time — catch-all)")}
+          <label class="sdc-f sdc-check">
+            <input type="checkbox" data-tou="free" data-toufield="enabled" ${
+              touBand("free").enabled ? "checked" : ""
+            } />
+            <span>Enable free usage window ($0)</span>
+          </label>
+          ${touWindows("free", d.tou.free.windows)}
         </div>
       </div>`;
 
@@ -3833,6 +4081,7 @@ class SolarDashboardCardEditor extends HTMLElement {
       ${numbers}
       ${reportOptions}
       ${costPeriod}
+      ${touSection}
       ${flowColours}
       ${nodeColours}
       ${homeGlowSec}
@@ -3916,6 +4165,16 @@ class SolarDashboardCardEditor extends HTMLElement {
       el.addEventListener("change", (e) =>
         this._setHomeGlow(e.target.dataset.glow, e.target.value)
       )
+    );
+    root.querySelectorAll("[data-tou]").forEach((el) =>
+      el.addEventListener("change", (e) => {
+        const t = e.target;
+        let v;
+        if (t.type === "checkbox") v = t.checked;
+        else if (t.type === "number") v = t.value === "" ? "" : parseFloat(t.value);
+        else v = t.value.trim();
+        this._setTou(t.dataset.tou, t.dataset.toufield, v);
+      })
     );
   }
 }
