@@ -54,9 +54,10 @@ quarter_days: 91               # legacy fallback only
 #   * Off-peak is the CATCH-ALL — any time not matched by free/peak/shoulder is
 #     billed at the off-peak rate, so you don't have to cover all 24h exactly.
 #   * Free (when enabled) overrides every band at $0 during its windows.
-# The report's Cost tab splits your real imported-kWh history into these bands
-# by the actual time it happened, so its figure is exact. The always-on cost
-# card has no time breakdown, so it shows a duration-weighted AVG rate instead.
+# Both the report's Cost tab and the cost card split your real imported-kWh
+# history into these bands by the actual time it happened, so the figure is
+# exact. (The card refreshes its by-time history at most every 15 min, showing
+# a duration-weighted AVG-rate estimate only until the first fetch completes.)
 # tariff_mode: tou
 # tou:
 #   peak:

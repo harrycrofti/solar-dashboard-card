@@ -176,17 +176,25 @@ tou:
 - **Export/feed-in stays a single flat rate** (`export_tariff`) — that matches
   how most feed-in tariffs are billed.
 
-**Where TOU is exact vs. approximate**
+**How TOU cost is calculated**
 
-- The **reporting panel → Cost tab** splits your real imported-kWh *history*
-  into bands by the actual local time each interval occurred, then charges each
-  band its rate. This is an exact by-time cost and shows a per-band breakdown
-  (Peak / Shoulder / Off-peak / Free).
-- The **always-on cost card** (monthly/quarterly) only sees a cumulative meter
-  total or instantaneous power — it has no time-of-day breakdown — so in TOU
-  mode it applies a **duration-weighted average import rate** and is labelled
-  `TOU · AVG`. For the precise by-time figure, read the report's Cost tab for
-  the `Billing month` / `Billing quarter` range.
+Both the report and the cost card charge imports by the **actual local time
+each interval occurred**, so peak-heavy usage is billed at peak rates:
+
+- The **reporting panel → Cost tab** integrates your imported-kWh *history* for
+  the selected range into bands and shows a per-band breakdown (Peak / Shoulder
+  / Off-peak / Free).
+- The **cost card** (monthly/quarterly) does the same for the current billing
+  period in the background — it fetches that period's import history, splits it
+  into bands and shows the exact cost, tagged `TOU`. The by-time history is
+  refreshed at most every 15 minutes (billing totals move slowly), so on first
+  load — or if the grid import sensor has no history — the card briefly shows a
+  duration-weighted **average-rate** estimate tagged `TOU · EST` until the exact
+  figure arrives.
+
+> The card's by-time fetch needs a **grid import power sensor**
+> (`grid_import_sensor` / `grid_feed_in_sensor`) with history. Export/feed-in is
+> always credited at the single flat `export_tariff`.
 
 Leave `tariff_mode: single` (the default) to keep the flat `import_tariff`.
 

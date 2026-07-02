@@ -289,6 +289,9 @@ class SolarDashboardCard extends HTMLElement {
     merged.node_colors = { ...(config.node_colors || {}) };
     merged.metrics = this._normaliseMetrics(config.metrics || []);
     this._config = this._resolveEntities(merged);
+    // Drop any cached TOU cost so edited rates/windows/mode take effect at once.
+    this._touCardCost = undefined;
+    this._touCardFetchedAt = undefined;
     this._reportRange = this._reportRange || merged.report_default_range || "today";
     this._reportTab = this._reportTab || merged.report_default_tab || "overview";
     this._built = false; // force rebuild
@@ -1206,9 +1209,68 @@ class SolarDashboardCard extends HTMLElement {
   }
 
   _updateCost(importW, exportW) {
+    // In TOU mode, keep an exact by-time cost for each period fresh in the
+    // background (see _maybeFetchTouCard); the render below uses it when ready.
+    this._maybeFetchTouCard();
     (this._costPeriods || ["quarter"]).forEach((p) =>
       this._updateCostPeriod(p, importW, exportW)
     );
+  }
+
+  /**
+   * TOU only: fetch import/export/load history for each shown billing period,
+   * integrate imports into peak/shoulder/off-peak/free bands by the actual
+   * time they occurred, and cache the exact cost. Throttled (billing totals
+   * move slowly) so the always-on card stays cheap even for a quarter range.
+   */
+  _maybeFetchTouCard() {
+    if (!this._isTou()) return;
+    if (!this._hass || !this._hass.callWS) return;
+    if (!this._config.grid_import_sensor) return; // nothing to integrate
+    const interval = Math.max(
+      (Number(this._config.graph_poll_interval) || 300) * 1000,
+      900000 // at least 15 min
+    );
+    this._touCardFetchedAt = this._touCardFetchedAt || {};
+    this._touCardFetching = this._touCardFetching || {};
+    (this._costPeriods || ["quarter"]).forEach((p) => {
+      if (this._touCardFetching[p]) return;
+      if (Date.now() - (this._touCardFetchedAt[p] || 0) < interval) return;
+      this._fetchTouCard(p);
+    });
+  }
+
+  async _fetchTouCard(period) {
+    this._touCardFetching[period] = true;
+    try {
+      const C = this._config;
+      const map = {
+        import: { entity: C.grid_import_sensor, mode: "power" },
+        export: { entity: C.grid_export_sensor, mode: "power" },
+        load: { entity: C.load_power_sensor, mode: "power" },
+      };
+      const start = this._periodStart(period);
+      const end = new Date();
+      const series = await this._fetchHistory(map, start, end);
+      if (!series.import || !series.import.length) return; // keep fallback
+      const rates = this._touRates();
+      const impBand = this._integrateByBand(series.import);
+      const loadBand = this._integrateByBand(series.load);
+      this._touCardCost = this._touCardCost || {};
+      this._touCardCost[period] = {
+        usage: this._touCost(impBand, rates),
+        noSolarImport: this._touCost(loadBand, rates),
+        importKwh: this._integrate(series.import),
+        exportKwh: this._integrate(series.export),
+        impBand,
+      };
+      this._touCardFetchedAt[period] = Date.now();
+      this._updateCostPeriod(period, null, null); // re-render with exact figures
+    } catch (e) {
+      // Leave the avg-rate fallback in place on failure.
+    } finally {
+      this._touCardFetching[period] = false;
+    }
   }
 
   _updateCostPeriod(period, importW, exportW) {
@@ -1216,10 +1278,6 @@ class SolarDashboardCard extends HTMLElement {
     if (!els) return;
     const C = this._config;
     const isTou = this._isTou();
-    // In TOU mode the card (which has no time-of-day breakdown of energy) uses
-    // a duration-weighted average import rate; the report's Cost tab gives the
-    // exact per-band figure. Single mode uses the flat import tariff.
-    const impTariff = isTou ? this._touAvgImportRate() : Number(C.import_tariff);
     const expTariff = Number(C.export_tariff);
     const dailyFee = Number(C.daily_connection_fee) || 0;
     // Days so far in the current billing period (start day → today, inclusive).
@@ -1228,19 +1286,40 @@ class SolarDashboardCard extends HTMLElement {
     const feeNote = dailyFee
       ? ` · Supply ${days}d @ $${dailyFee}/day = ${this._fmtMoney(connection)}`
       : "";
+
+    // TOU (preferred): exact by-time cost from billing-period history — imports
+    // split into bands by the actual time they occurred (see _fetchTouCard).
+    const touExact = isTou && this._touCardCost && this._touCardCost[period];
+    if (touExact) {
+      const t = touExact;
+      const b = t.impBand;
+      const cost = t.usage - (t.exportKwh || 0) * expTariff + connection;
+      els.tag.textContent = "TOU";
+      els.tag.className = "sdc-cost-tag actual";
+      els.value.textContent = this._fmtMoney(cost);
+      els.foot.textContent =
+        `Peak ${b.peak.toFixed(1)} · Shoulder ${b.shoulder.toFixed(1)} · Off-peak ${b.offpeak.toFixed(1)}` +
+        (b.free > 0.05 ? ` · Free ${b.free.toFixed(1)}` : "") +
+        ` kWh · Export ${(t.exportKwh || 0).toFixed(1)} kWh @ $${expTariff}${feeNote}`;
+      return;
+    }
+
+    // Single mode uses the flat import tariff; TOU falls back to a duration-
+    // weighted average rate until the by-time history above has loaded.
+    const impTariff = isTou ? this._touAvgImportRate() : Number(C.import_tariff);
     const rateNote = isTou
-      ? ` (TOU avg $${impTariff.toFixed(3)}/kWh — see report Cost tab for by-time)`
+      ? ` (TOU avg $${impTariff.toFixed(3)}/kWh until by-time history loads)`
       : "";
     const [impSensor, expSensor] = this._energySensorsFor(period);
     const impKwh = impSensor ? this._energyKwh(impSensor) : null;
     const expKwh = expSensor ? this._energyKwh(expSensor) : null;
 
     if (impKwh !== null || expKwh !== null) {
-      // Accurate: from real energy totals (utility_meter etc.).
+      // From real energy totals (utility_meter etc.).
       const cost =
         (impKwh || 0) * impTariff - (expKwh || 0) * expTariff + connection;
-      els.tag.textContent = isTou ? "TOU · AVG" : "FROM ENERGY";
-      els.tag.className = "sdc-cost-tag actual";
+      els.tag.textContent = isTou ? "TOU · EST" : "FROM ENERGY";
+      els.tag.className = "sdc-cost-tag" + (isTou ? "" : " actual");
       els.value.textContent = this._fmtMoney(cost);
       els.foot.textContent = `Import ${(impKwh || 0).toFixed(
         1
