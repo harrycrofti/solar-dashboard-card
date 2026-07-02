@@ -276,8 +276,10 @@ Battery, Grid, Solar/PV, Inverter, Events and custom Metrics.
   visible series' value at the cursor, and the Y-axis auto-rescales to the zoomed
   window so fine detail is visible. Click legend items to show/hide series.
 - **Battery timing** — live **time-to-full** while charging (rate + estimated
-  clock time) and **time-to-reserve / time-to-empty** while discharging, with a
-  SoC bar marking your reserve and full-charge targets. Auto-switches on the
+  clock time) and, while discharging, **time-to-reserve**, **time-to-low**
+  (how long until the battery hits `battery_low_soc`, default 10%, at the
+  current draw) and **time-to-empty**, each with an estimated clock time. The
+  SoC bar marks your low, reserve and full-charge targets. Auto-switches on the
   measured charge/discharge state.
 - **Headline metrics** — self-sufficiency, self-consumption, **CO₂ avoided**,
   **$ saved vs. no-solar**, **battery autonomy** (runtime at average load) and
@@ -392,6 +394,7 @@ metrics:
 | `report_show_previous` | bool | `true` | Fetch and compare the previous matching range where relevant. |
 | `battery_capacity_kwh` | number | _(none)_ | Battery capacity used for cycle estimates and full-time forecasts. |
 | `battery_reserve_soc` | number | `20` | Reserve threshold used for "time below reserve". |
+| `battery_low_soc` | number | `10` | Low-battery threshold for the "time to X%" battery-timing tile — how long until the battery reaches this SoC at the current discharge draw. Needs `battery_capacity_kwh`. |
 | `battery_full_soc` | number | `100` | Target SoC used for "time full" and battery-full ETA. |
 | `battery_charge_efficiency` | number | `0.92` | Forecast conversion factor for solar surplus into stored battery energy. |
 | `co2_factor_kg_per_kwh` | number | `0.79` | Grid emissions factor used for the **CO₂ avoided** metric (kg CO₂ per kWh). Default ≈ Australian grid average; set your region's value. |

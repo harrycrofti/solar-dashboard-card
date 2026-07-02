@@ -140,6 +140,7 @@ const DEFAULTS = {
   report_show_previous: true,
   battery_capacity_kwh: undefined,
   battery_reserve_soc: 20,
+  battery_low_soc: 10, // low-battery warning threshold — "time to X%" at current draw
   battery_full_soc: 100,
   battery_charge_efficiency: 0.92,
   solar_inverter_ac_capacity_w: undefined,
@@ -2010,9 +2011,12 @@ class SolarDashboardCard extends HTMLElement {
           "Set battery_capacity_kwh and battery_soc_sensor for charge/discharge estimates.",
       };
     }
+    const lowRaw = Number(C.battery_low_soc);
+    const lowSoc = Number.isFinite(lowRaw) ? Math.max(0, Math.min(100, lowRaw)) : 10;
     const now = Date.now();
     const remainingKwh = Math.max(0, ((target - soc) / 100) * capacity); // to full target
     const usableKwh = Math.max(0, ((soc - reserveSoc) / 100) * capacity); // down to reserve
+    const lowKwh = Math.max(0, ((soc - lowSoc) / 100) * capacity); // down to low threshold
     const emptyKwh = Math.max(0, (soc / 100) * capacity); // down to 0%
 
     // live mode from measured power
@@ -2046,8 +2050,10 @@ class SolarDashboardCard extends HTMLElement {
     // prefer the measured discharge power; fall back to current house load draw
     const drawW = dischargeW > 20 ? dischargeW : mode === "discharging" && loadW ? loadW : dischargeW;
     const timeToReserve = drawW > 20 ? usableKwh / (drawW / 1000) : null;
+    const timeToLow = drawW > 20 ? lowKwh / (drawW / 1000) : null;
     const timeToEmpty = drawW > 20 ? emptyKwh / (drawW / 1000) : null;
     const reserveAt = timeToReserve !== null ? now + timeToReserve * 3600000 : null;
+    const lowAt = timeToLow !== null ? now + timeToLow * 3600000 : null;
     const emptyAt = timeToEmpty !== null ? now + timeToEmpty * 3600000 : null;
 
     let message;
@@ -2060,10 +2066,12 @@ class SolarDashboardCard extends HTMLElement {
           : "Charging, but forecast surplus may not reach the full target.";
     else if (mode === "discharging")
       message =
-        timeToReserve !== null
+        timeToLow !== null
           ? `Discharging at ${this._fmtPower(drawW)} — about ${this._fmtDuration(
+              timeToLow
+            )} until ${lowSoc}% at the current draw (${this._fmtDuration(
               timeToReserve
-            )} of usable charge above reserve.`
+            )} to the ${reserveSoc}% reserve).`
           : "Battery is discharging.";
     else message = "Battery idle — no significant charge or discharge right now.";
 
@@ -2073,9 +2081,11 @@ class SolarDashboardCard extends HTMLElement {
       soc,
       target,
       reserveSoc,
+      lowSoc,
       capacity,
       remainingKwh,
       usableKwh,
+      lowKwh,
       emptyKwh,
       chargeW,
       dischargeW,
@@ -2085,8 +2095,10 @@ class SolarDashboardCard extends HTMLElement {
       chargeEtaHours,
       fullAt,
       timeToReserve,
+      timeToLow,
       timeToEmpty,
       reserveAt,
+      lowAt,
       emptyAt,
       solarRemaining,
       loadRemaining,
@@ -2647,6 +2659,7 @@ class SolarDashboardCard extends HTMLElement {
         this._tile("Usable now", this._fmtKwh(f.usableKwh, 2), P.soc, `above ${f.reserveSoc}% reserve`) +
         this._tile("Draw", this._fmtPower(f.drawW), P.dis) +
         this._tile("To reserve", this._fmtDuration(f.timeToReserve), P.imp, f.reserveAt ? `~${this._fmtDateTime(f.reserveAt)}` : "") +
+        this._tile(`To ${f.lowSoc}%`, this._fmtDuration(f.timeToLow), P.imp, f.lowAt ? `~${this._fmtDateTime(f.lowAt)}` : "") +
         this._tile("To empty", this._fmtDuration(f.timeToEmpty), P.dis, f.emptyAt ? `~${this._fmtDateTime(f.emptyAt)}` : "");
     } else {
       tiles =
@@ -2658,6 +2671,7 @@ class SolarDashboardCard extends HTMLElement {
     const soc = Math.max(0, Math.min(100, f.soc));
     const bar = `<div class="sdc-soc-bar">
       <div class="sdc-soc-fill" style="width:${soc}%;background:linear-gradient(90deg, ${P.dis}, ${P.soc})"></div>
+      <div class="sdc-soc-mark low" style="left:${Math.max(0, Math.min(100, f.lowSoc))}%" title="Low ${f.lowSoc}%"></div>
       <div class="sdc-soc-mark" style="left:${Math.max(0, Math.min(100, f.reserveSoc))}%" title="Reserve ${f.reserveSoc}%"></div>
       <div class="sdc-soc-mark target" style="left:${Math.max(0, Math.min(100, f.target))}%" title="Target ${f.target}%"></div>
       <span class="sdc-soc-label">${Math.round(f.soc)}%</span>
@@ -3591,6 +3605,7 @@ class SolarDashboardCard extends HTMLElement {
         background: rgba(255,255,255,0.65); transform: translateX(-1px);
       }
       .sdc-soc-mark.target { background: #ffd34d; box-shadow:0 0 6px #ffd34d; }
+      .sdc-soc-mark.low { background: #ff5d5d; box-shadow:0 0 6px #ff5d5d; }
       .sdc-soc-label {
         position:absolute; right:7px; top:50%; transform: translateY(-50%);
         font-family: ui-monospace, monospace; font-size:0.66rem; font-weight:800;
@@ -3697,6 +3712,7 @@ const NUMBER_FIELDS = [
   ["graph_poll_interval", "Graph refresh (s)", 10],
   ["battery_capacity_kwh", "Battery capacity (kWh)", 0.1],
   ["battery_reserve_soc", "Battery reserve SoC (%)", 1],
+  ["battery_low_soc", "Battery low-warning SoC (%)", 1],
   ["battery_full_soc", "Battery full target SoC (%)", 1],
   ["battery_charge_efficiency", "Battery charge efficiency", 0.01],
   ["solar_inverter_ac_capacity_w", "Inverter AC capacity (W)", 100],

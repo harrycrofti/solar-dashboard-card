@@ -122,6 +122,7 @@ report_show_previous: true
 # Battery analytics + full-time forecast
 battery_capacity_kwh: 9.6
 battery_reserve_soc: 20
+battery_low_soc: 10            # "time to 10%" battery-timing tile (at current draw)
 battery_full_soc: 100
 battery_charge_efficiency: 0.92
 # Optional forecast sensors (kWh remaining from now)
