@@ -997,9 +997,11 @@ class SolarDashboardCard extends HTMLElement {
       gel.addEventListener("pointermove", (e) => this._onChartPointerMove(e));
       gel.addEventListener("pointerup", () => this._onChartPointerUp());
       gel.addEventListener("pointercancel", () => this._onChartPointerUp());
-      gel.addEventListener("pointerleave", () => {
+      gel.addEventListener("pointerleave", (e) => {
         this._onChartPointerUp();
-        this._hideChartOverlays();
+        // On touch there's no hover, so keep the last readout visible after the
+        // finger lifts; only clear it when a real mouse pointer leaves.
+        if (!e || e.pointerType === "mouse") this._hideChartOverlays();
       });
       gel.addEventListener("dblclick", (e) => this._onChartDblClick(e));
     }
@@ -2575,7 +2577,7 @@ class SolarDashboardCard extends HTMLElement {
         const cid = `${id}-${d.key}`;
         return `
           <path d="${area}" fill="url(#fill-${cid})" stroke="none" opacity="0.16" />
-          <path d="${path}" fill="none" stroke="${d.color}" stroke-width="1.7" stroke-linejoin="round" vector-effect="non-scaling-stroke" filter="url(#glow-${id})" />
+          <path d="${path}" fill="none" stroke="${d.color}" stroke-width="1.7" stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke" />
           ${
             showPeak
               ? `<circle cx="${peakX}" cy="${peakY}" r="1.7" fill="${d.color}"><title>${this._esc(d.label)} peak ${this._metricFormat(st.max, d.unit)} at ${this._fmtDateTime(st.peakTime)}</title></circle>`
@@ -2583,7 +2585,7 @@ class SolarDashboardCard extends HTMLElement {
           }`;
       })
       .join("");
-    const svg = `<defs>${grads}<filter id="glow-${id}" x="-20%" y="-20%" width="140%" height="140%"><feGaussianBlur stdDeviation="0.7" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs>${this._gridlines(H)}${paths}`;
+    const svg = `<defs>${grads}</defs>${this._gridlines(H)}${paths}`;
     return { svg, vd, vmin, vmax };
   }
 
@@ -2622,7 +2624,7 @@ class SolarDashboardCard extends HTMLElement {
         <div class="sdc-g-h sdc-chart-head">
           <span>${title}</span>
           <span class="sdc-chart-tools">
-            <span class="sdc-chart-hint">scroll · zoom &nbsp;|&nbsp; drag · pan</span>
+            <span class="sdc-chart-hint">scroll · zoom &nbsp;|&nbsp; drag · pan &nbsp;|&nbsp; touch · read</span>
             <button class="sdc-chart-reset" data-chart-reset="${id}" ${zoomed ? "" : "hidden"}>⟲ reset</button>
           </span>
         </div>
@@ -2732,8 +2734,16 @@ class SolarDashboardCard extends HTMLElement {
     if (!plot) return;
     const chartEl = plot.closest(".sdc-chart");
     if (!chartEl) return;
-    if (e.pointerType === "mouse" && e.button !== 0) return;
     const id = chartEl.dataset.chart;
+    // Touch / pen have no hover, so a tap or drag scrubs the crosshair +
+    // tooltip instead of panning — that makes the graph readable on mobile.
+    // (Panning only matters when zoomed in, which needs a wheel/desktop.)
+    if (e.pointerType && e.pointerType !== "mouse") {
+      this._chartScrub = { id };
+      this._chartTooltip(chartEl, e.clientX);
+      return;
+    }
+    if (e.button !== 0) return;
     this._chartPan = {
       id,
       x: e.clientX,
@@ -2754,6 +2764,17 @@ class SolarDashboardCard extends HTMLElement {
       this._redrawChart(id);
       return;
     }
+    // Touch scrub: keep updating the tooltip for the chart we started on, even
+    // if the finger drifts over the axis labels or gridlines.
+    if (this._chartScrub) {
+      const chartEl =
+        this._els.graphsEl &&
+        this._els.graphsEl.querySelector(
+          `.sdc-chart[data-chart="${this._chartScrub.id}"]`
+        );
+      if (chartEl) this._chartTooltip(chartEl, e.clientX);
+      return;
+    }
     const plot = e.target.closest && e.target.closest(".sdc-chart-plot");
     if (plot) this._chartTooltip(plot.closest(".sdc-chart"), e.clientX);
     else this._hideChartOverlays();
@@ -2761,6 +2782,7 @@ class SolarDashboardCard extends HTMLElement {
 
   _onChartPointerUp() {
     this._chartPan = null;
+    this._chartScrub = null;
   }
 
   _onChartDblClick(e) {
