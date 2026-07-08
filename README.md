@@ -173,8 +173,37 @@ tou:
 - **Precedence** when windows overlap: `free` → `peak` → `shoulder` →
   `off-peak`. So a free window at 11am–2pm wins even if it also falls in
   shoulder.
-- **Export/feed-in stays a single flat rate** (`export_tariff`) — that matches
-  how most feed-in tariffs are billed.
+- **Export/feed-in** defaults to the single flat `export_tariff`, but can also
+  be billed by time of day — see below.
+
+**Time-of-use feed-in (export)**
+
+Many plans now pay **different feed-in rates at different times** (e.g. a boosted
+early-evening export credit). Add an `export_tou` block to bill exports by the
+time they occurred. The feed-in peak/shoulder/off-peak **times are independent
+of the import windows** above — set them to whatever your plan uses:
+
+```yaml
+tariff_mode: tou          # export TOU only applies in TOU mode
+export_tou:
+  peak:
+    rate: 0.10
+    windows: "18:00-21:00"               # boosted evening feed-in
+  shoulder:
+    rate: 0.02
+    windows: "16:00-18:00,21:00-23:00"
+  offpeak:
+    rate: 0                              # catch-all (e.g. $0 the rest of the day)
+```
+
+- Same window rules as import (24-hour `HH:MM-HH:MM`, comma-separated, may wrap
+  past midnight). **Off-peak is the catch-all**; there is no `free` band.
+- Active only when **at least one export window is set**. Leave all export
+  windows blank to fall back to the flat `export_tariff`.
+- Exports are integrated into bands by the **actual local time** each interval
+  occurred, exactly like imports, and shown as per-band **Feed-in** rows in the
+  Cost tab. The cost card uses a duration-weighted average feed-in rate until
+  the by-time history loads.
 
 **How TOU cost is calculated**
 
@@ -193,8 +222,10 @@ each interval occurred**, so peak-heavy usage is billed at peak rates:
   figure arrives.
 
 > The card's by-time fetch needs a **grid import power sensor**
-> (`grid_import_sensor` / `grid_feed_in_sensor`) with history. Export/feed-in is
-> always credited at the single flat `export_tariff`.
+> (`grid_import_sensor` / `grid_feed_in_sensor`) with history. Time-of-use
+> feed-in additionally needs a **grid export power sensor**
+> (`grid_export_sensor` / `grid_consumption_sensor`) with history; without one,
+> exports fall back to the flat `export_tariff`.
 
 Leave `tariff_mode: single` (the default) to keep the flat `import_tariff`.
 
@@ -364,9 +395,10 @@ metrics:
 | `details_overlay_boolean` | entity | `input_boolean.energy_vision_details` | When `on`, shows the extended details grid. |
 | `tariff_mode` | string | `single` | `single` (flat `import_tariff`) or `tou` (time-of-use bands — see [Time-of-use tariffs](#time-of-use-tou-tariffs)). |
 | `import_tariff` | number | `0.24` | $ per kWh imported (used in `single` mode). |
-| `export_tariff` | number | `0.40` | $ per kWh exported (feed-in). Always a single flat rate, even in TOU mode. |
+| `export_tariff` | number | `0.40` | $ per kWh exported (feed-in). Flat rate; used unless time-of-use feed-in (`export_tou`) is configured. |
 | `tou.peak` / `tou.shoulder` / `tou.offpeak` | map | _(see TOU section)_ | Each has `rate` ($/kWh) and `windows` (`"HH:MM-HH:MM"`, comma-separated, may wrap past midnight). Off-peak is the catch-all for any unmatched time. |
 | `tou.free` | map | `{enabled:false, windows:"11:00-14:00"}` | `enabled` + `windows`; when enabled, those times are billed at $0 and override all other bands. |
+| `export_tou.peak` / `export_tou.shoulder` / `export_tou.offpeak` | map | _(see TOU section)_ | Time-of-use **feed-in** bands (independent windows from import). Each has `rate` ($/kWh) and `windows`. Off-peak is the catch-all; no `free` band. Active in TOU mode only when at least one export window is set, else the flat `export_tariff` applies. |
 | `daily_connection_fee` | number | `0` | Fixed grid supply charge in $ per day. Added to every cost card as `fee × days in the period` (applies to both the accurate and estimated figures). |
 | `cost_period` | string | `quarter` | Which cost card(s) to show: `quarter`, `month`, or `both`. |
 | `month_start_day` | number | `1` | Day of month the billing month starts (used for the monthly day-count). |
