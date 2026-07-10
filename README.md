@@ -188,14 +188,19 @@ tariff_mode: tou          # export TOU only applies in TOU mode
 export_tou:
   peak:
     rate: 0.10
-    windows: "18:00-21:00"               # boosted evening feed-in
+    windows: "18:00-21:00"               # boosted evening feed-in (highest tier)
+  mid_peak:
+    rate: 0.05
+    windows: "16:00-18:00"               # 4th "mid-peak" tier with its own window
   shoulder:
     rate: 0.02
-    windows: "16:00-18:00,21:00-23:00"
+    windows: "21:00-23:00"
   offpeak:
     rate: 0                              # catch-all (e.g. $0 the rest of the day)
 ```
 
+- Four feed-in tiers: `peak`, `mid_peak`, `shoulder`, `offpeak`. Precedence when
+  windows overlap is **peak > mid-peak > shoulder > off-peak**.
 - Same window rules as import (24-hour `HH:MM-HH:MM`, comma-separated, may wrap
   past midnight). **Off-peak is the catch-all**; there is no `free` band.
 - Active only when **at least one export window is set**. Leave all export
@@ -204,6 +209,24 @@ export_tou:
   occurred, exactly like imports, and shown as per-band **Feed-in** rows in the
   Cost tab. The cost card uses a duration-weighted average feed-in rate until
   the by-time history loads.
+
+### Zero-import bonus
+
+Some plans credit a **fixed amount per day** when your grid import over a window
+stays near-zero (e.g. $1/day if import < 0.03 kWh/h between 6–9pm). Enable it and
+set the amount; toggle it off if you change provider.
+
+```yaml
+zero_import_bonus: true            # master toggle (off by default)
+zero_import_bonus_amount: 1        # $/day credited when earned
+zero_import_bonus_window: "18:00-21:00"   # the near-zero-import window
+zero_import_bonus_threshold: 0.03  # kWh/hour import ceiling to still qualify
+```
+
+- Shown as a **Zero-import bonus** credit row in the Cost tab and subtracted from
+  the net cost / added to savings on every cost card.
+- The estimate **assumes the bonus is earned each day** in the period (its intent
+  is a plan you reliably hit); the window/threshold are recorded for reference.
 
 **How TOU cost is calculated**
 
@@ -398,8 +421,12 @@ metrics:
 | `export_tariff` | number | `0.40` | $ per kWh exported (feed-in). Flat rate; used unless time-of-use feed-in (`export_tou`) is configured. |
 | `tou.peak` / `tou.shoulder` / `tou.offpeak` | map | _(see TOU section)_ | Each has `rate` ($/kWh) and `windows` (`"HH:MM-HH:MM"`, comma-separated, may wrap past midnight). Off-peak is the catch-all for any unmatched time. |
 | `tou.free` | map | `{enabled:false, windows:"11:00-14:00"}` | `enabled` + `windows`; when enabled, those times are billed at $0 and override all other bands. |
-| `export_tou.peak` / `export_tou.shoulder` / `export_tou.offpeak` | map | _(see TOU section)_ | Time-of-use **feed-in** bands (independent windows from import). Each has `rate` ($/kWh) and `windows`. Off-peak is the catch-all; no `free` band. Active in TOU mode only when at least one export window is set, else the flat `export_tariff` applies. |
+| `export_tou.peak` / `export_tou.mid_peak` / `export_tou.shoulder` / `export_tou.offpeak` | map | _(see TOU section)_ | Time-of-use **feed-in** bands (independent windows from import). Each has `rate` ($/kWh) and `windows`. Four tiers; precedence peak > mid-peak > shoulder > off-peak; off-peak is the catch-all (no `free` band). Active in TOU mode only when at least one export window is set, else the flat `export_tariff` applies. |
 | `daily_connection_fee` | number | `0` | Fixed grid supply charge in $ per day. Added to every cost card as `fee × days in the period` (applies to both the accurate and estimated figures). |
+| `zero_import_bonus` | bool | `false` | Toggle a fixed daily bonus credit for near-zero grid import over a window (e.g. a provider's $1/day zero-import reward). |
+| `zero_import_bonus_amount` | number | `1` | $/day credited when the bonus is enabled (subtracted from net cost; assumed earned each day in the period). |
+| `zero_import_bonus_window` | string | `"18:00-21:00"` | The window the near-zero-import condition applies to (recorded for reference). |
+| `zero_import_bonus_threshold` | number | `0.03` | Import ceiling in kWh/hour to still qualify (recorded for reference). |
 | `cost_period` | string | `quarter` | Which cost card(s) to show: `quarter`, `month`, or `both`. |
 | `month_start_day` | number | `1` | Day of month the billing month starts (used for the monthly day-count). |
 | `quarter_start_date` | string | _(Jan 1)_ | Quarter anchor as `YYYY-MM-DD` or `MM-DD`; quarters repeat every 3 months from it. |

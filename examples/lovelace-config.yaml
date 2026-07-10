@@ -73,6 +73,29 @@ quarter_days: 91               # legacy fallback only
 #     enabled: true
 #     windows: "11:00-14:00"     # billed at $0 while enabled
 
+# --- Time-of-use FEED-IN (export) tariff — four tiers -----------------------
+# Independent windows from import. Precedence peak > mid_peak > shoulder > offpeak.
+# export_tou:
+#   peak:
+#     rate: 0.10
+#     windows: "18:00-21:00"     # boosted evening feed-in
+#   mid_peak:
+#     rate: 0.05
+#     windows: "16:00-18:00"     # 4th "mid-peak" tier, its own window
+#   shoulder:
+#     rate: 0.02
+#     windows: "21:00-23:00"
+#   offpeak:
+#     rate: 0                    # catch-all
+
+# --- Zero-import bonus -------------------------------------------------------
+# Fixed daily credit when grid import over a window stays near-zero. Toggle off
+# if you change provider. The estimate credits it for each day in the period.
+# zero_import_bonus: true
+# zero_import_bonus_amount: 1           # $/day
+# zero_import_bonus_window: "18:00-21:00"
+# zero_import_bonus_threshold: 0.03     # kWh/hour import ceiling
+
 # --- Flow colours -----------------------------------------------------------
 # Per-direction flow-dot colours (each unset key uses its built-in default):
 flow_colors:
