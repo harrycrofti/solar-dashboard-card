@@ -1643,8 +1643,23 @@ class SolarDashboardCard extends HTMLElement {
       pts.push({ t, v: v * scale });
     }
     pts.sort((a, b) => a.t - b.t);
-    if (pts.length) pts.push({ t: endMs, v: pts[pts.length - 1].v }); // extend to now
-    return pts;
+    // Home Assistant's recorder only stores a state when it CHANGES, so a sensor
+    // that sits at a constant value (e.g. grid import at 0 while exporting, for
+    // hours) leaves one sample then a long gap until the next change. Linear /
+    // trapezoidal interpolation across that gap fabricates a ramp between the two
+    // samples — which both draws a phantom slope on the graph and, once
+    // integrated, invents energy in whatever tariff band the gap's midpoint falls
+    // in. Convert to a STEP series: carry each value forward until the instant it
+    // changes, then jump. This makes the line render as steps and makes the
+    // trapezoidal integral equal an exact left-Riemann (hold-last-value) sum.
+    const stepped = [];
+    for (let i = 0; i < pts.length; i++) {
+      if (i > 0) stepped.push({ t: pts[i].t, v: pts[i - 1].v });
+      stepped.push(pts[i]);
+    }
+    if (stepped.length)
+      stepped.push({ t: endMs, v: stepped[stepped.length - 1].v }); // extend to now
+    return stepped;
   }
 
   /** Trapezoidal integral of a power(W) series → kWh. */
