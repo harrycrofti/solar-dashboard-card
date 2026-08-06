@@ -10,7 +10,7 @@
  * License: MIT
  */
 
-const CARD_VERSION = "1.8.0";
+const CARD_VERSION = "1.9.0";
 
 /* eslint-disable no-console */
 console.info(
@@ -126,6 +126,20 @@ const DEFAULTS = {
   // Legacy aliases — used as the quarter sensors if the *_quarter_* keys are unset.
   import_energy_sensor: undefined,
   export_energy_sensor: undefined,
+  // Fast, EXACT TOU cost via per-band energy meters that carry long-term
+  // statistics (e.g. utility_meter sensors). When set, the card reads each
+  // billing period's per-band kWh from recorder statistics — a tiny query that
+  // returns a handful of daily buckets — instead of fetching and integrating a
+  // whole month/quarter of raw POWER history in the browser (huge payload that
+  // hangs the page and, until it loads, leaves a bogus instantaneous-power
+  // projection on screen). Keys are the CARD bands (peak/shoulder/offpeak/free)
+  // mapped to the entity_id of the matching import meter; a missing band = 0.
+  // Works for any period because statistics sum the meter's deltas across its
+  // daily resets, so the same daily meters serve month AND quarter windows.
+  tou_import_band_sensors: {}, // { peak, shoulder, offpeak, free }: entity_id
+  // Optional statistics-backed total export meter, credited at the export TOU
+  // average (or flat export_tariff) since there is no per-band export split.
+  tou_export_energy_sensor: undefined,
 
   // Behaviour
   poll_interval: 10, // seconds
@@ -315,6 +329,9 @@ class SolarDashboardCard extends HTMLElement {
     };
     merged.flow_colors = { ...(config.flow_colors || {}) };
     merged.node_colors = { ...(config.node_colors || {}) };
+    merged.tou_import_band_sensors = {
+      ...(config.tou_import_band_sensors || {}),
+    };
     merged.metrics = this._normaliseMetrics(config.metrics || []);
     this._config = this._resolveEntities(merged);
     // Drop any cached TOU cost so edited rates/windows/mode take effect at once.
@@ -1263,11 +1280,109 @@ class SolarDashboardCard extends HTMLElement {
     );
     this._touCardFetchedAt = this._touCardFetchedAt || {};
     this._touCardFetching = this._touCardFetching || {};
+    const useStats = this._hasTouBandStats();
     (this._costPeriods || ["quarter"]).forEach((p) => {
       if (this._touCardFetching[p]) return;
       if (Date.now() - (this._touCardFetchedAt[p] || 0) < interval) return;
-      this._fetchTouCard(p);
+      if (useStats) this._fetchTouCardStats(p);
+      else this._fetchTouCard(p);
     });
+  }
+
+  /** True when per-band import meters (statistics-backed) are configured. */
+  _hasTouBandStats() {
+    if (!this._isTou()) return false;
+    const b = this._config.tou_import_band_sensors || {};
+    return Object.values(b).some(Boolean);
+  }
+
+  /**
+   * Exact per-band cost for a billing period, read from recorder STATISTICS of
+   * the configured per-band energy meters. This is the cheap path: instead of
+   * pulling a month/quarter of raw power history and integrating it in the
+   * browser, it asks the recorder for each meter's per-day `change` over the
+   * window and sums them — a few dozen numbers per sensor. Statistics sum the
+   * meter's deltas across its daily resets, so a daily utility_meter yields the
+   * correct month/quarter total.
+   */
+  async _fetchTouCardStats(period) {
+    this._touCardFetching[period] = true;
+    try {
+      const C = this._config;
+      const bandSensors = C.tou_import_band_sensors || {};
+      const ids = [...new Set(Object.values(bandSensors).filter(Boolean))];
+      const expId = C.tou_export_energy_sensor;
+      if (expId) ids.push(expId);
+      if (!ids.length) return;
+      const start = this._periodStart(period);
+      const end = new Date();
+      const totals = await this._fetchStatChange(ids, start, end);
+      const impBand = { peak: 0, mid_peak: 0, shoulder: 0, offpeak: 0, free: 0 };
+      for (const band of ["peak", "shoulder", "offpeak", "free"]) {
+        const sid = bandSensors[band];
+        if (sid && Number.isFinite(totals[sid])) impBand[band] = totals[sid];
+      }
+      const exportKwh =
+        expId && Number.isFinite(totals[expId]) ? totals[expId] : 0;
+      const importKwh =
+        impBand.peak + impBand.shoulder + impBand.offpeak + impBand.free;
+      this._touCardCost = this._touCardCost || {};
+      this._touCardCost[period] = {
+        usage: this._touCost(impBand, this._touRates()),
+        noSolarImport: null,
+        importKwh,
+        exportKwh,
+        impBand,
+        expBand: null, // no per-band export meter → credit uses avg/flat rate
+        exportCredit: null,
+      };
+      this._touCardFetchedAt[period] = Date.now();
+      this._updateCostPeriod(period, null, null); // re-render with exact figures
+    } catch (e) {
+      // Leave any existing figure / fallback in place on failure.
+    } finally {
+      this._touCardFetching[period] = false;
+    }
+  }
+
+  /**
+   * Sum each statistic's per-day `change` over [start, end]. Returns
+   * { statistic_id: totalKwh }. Robust to HA returning `change` (preferred),
+   * or falling back to first/last `state` deltas if `change` is absent.
+   */
+  async _fetchStatChange(ids, start, end) {
+    const out = {};
+    if (!ids.length || !this._hass || !this._hass.callWS) return out;
+    const res = await this._hass.callWS({
+      type: "recorder/statistics_during_period",
+      start_time: start.toISOString(),
+      end_time: end.toISOString(),
+      statistic_ids: ids,
+      period: "day",
+      types: ["change", "state"],
+    });
+    for (const id of ids) {
+      const rows = (res && res[id]) || [];
+      let sum = 0;
+      let haveChange = false;
+      for (const r of rows) {
+        if (r && Number.isFinite(r.change)) {
+          sum += r.change;
+          haveChange = true;
+        }
+      }
+      if (!haveChange && rows.length) {
+        // Fallback: last cumulative state minus first (approximate; ignores a
+        // reset inside the very first bucket).
+        const first = rows[0];
+        const last = rows[rows.length - 1];
+        const a = Number(first && (first.state ?? first.sum));
+        const b = Number(last && (last.state ?? last.sum));
+        if (Number.isFinite(a) && Number.isFinite(b) && b >= a) sum = b - a;
+      }
+      out[id] = sum;
+    }
+    return out;
   }
 
   async _fetchTouCard(period) {
@@ -1359,6 +1474,19 @@ class SolarDashboardCard extends HTMLElement {
         `Peak ${b.peak.toFixed(1)} · Shoulder ${b.shoulder.toFixed(1)} · Off-peak ${b.offpeak.toFixed(1)}` +
         (b.free > 0.05 ? ` · Free ${b.free.toFixed(1)}` : "") +
         ` kWh${exportNote}${feeNote}${bonusNote}`;
+      return;
+    }
+
+    // Band-statistics mode: the exact figure arrives via a tiny stats query
+    // (_fetchTouCardStats). Until it lands, show a neutral placeholder instead
+    // of the wildly-off instantaneous-power projection below. Keep any figure
+    // already on screen to avoid flicker on refresh.
+    if (isTou && this._hasTouBandStats()) {
+      els.tag.textContent = "TOU";
+      els.tag.className = "sdc-cost-tag";
+      const cur = els.value.textContent;
+      if (!cur || cur === "—") els.value.textContent = "…";
+      els.foot.textContent = "Calculating exact cost from meter statistics…";
       return;
     }
 
