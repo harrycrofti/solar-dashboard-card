@@ -10,7 +10,7 @@
  * License: MIT
  */
 
-const CARD_VERSION = "1.9.0";
+const CARD_VERSION = "1.10.0";
 
 /* eslint-disable no-console */
 console.info(
@@ -114,15 +114,25 @@ const DEFAULTS = {
   zero_import_bonus_amount: 1, // $/day credited when earned
   zero_import_bonus_window: "18:00-21:00", // window the near-zero import applies to
   zero_import_bonus_threshold: 0.03, // kWh/hour import ceiling to still qualify
-  cost_period: "quarter", // "quarter" | "month" | "both"
+  // "quarter" | "month" | "weeks" | "both" (= month + quarter). Combine any of
+  // them with "+" or "," to show several at once, e.g. "weeks+month".
+  cost_period: "quarter",
   month_start_day: 1, // day-of-month the billing month starts (1-31)
   quarter_start_date: "", // anchor "YYYY-MM-DD" or "MM-DD"; blank = Jan 1
   quarter_days: 91, // legacy fallback if the quarter anchor can't be computed
+  // Some retailers bill every N weeks (e.g. 4-weekly) instead of monthly, so a
+  // billing cycle drifts against the calendar. week_cycle_start anchors the
+  // phase: set it to the first day of any known cycle and every later cycle is
+  // counted forward from there in N-week steps.
+  week_cycle_weeks: 4, // weeks per billing cycle (1-13)
+  week_cycle_start: "", // anchor "YYYY-MM-DD"; blank = 1 Jan of the current year
   // Optional kWh totals for accurate cost (utility_meter sensors).
   import_energy_month_sensor: undefined,
   export_energy_month_sensor: undefined,
   import_energy_quarter_sensor: undefined,
   export_energy_quarter_sensor: undefined,
+  import_energy_weeks_sensor: undefined,
+  export_energy_weeks_sensor: undefined,
   // Legacy aliases — used as the quarter sensors if the *_quarter_* keys are unset.
   import_energy_sensor: undefined,
   export_energy_sensor: undefined,
@@ -237,6 +247,7 @@ const REPORT_RANGES = [
   ["7d", "7 days"],
   ["30d", "30 days"],
   ["billing_month", "Billing month"],
+  ["billing_weeks", "Billing cycle"],
   ["billing_quarter", "Billing quarter"],
 ];
 
@@ -838,15 +849,13 @@ class SolarDashboardCard extends HTMLElement {
       </button>`;
 
     // Which cost period card(s) to render.
-    const cp = String(this._config.cost_period || "quarter").toLowerCase();
-    const periods =
-      cp === "both"
-        ? ["month", "quarter"]
-        : cp === "month"
-        ? ["month"]
-        : ["quarter"];
+    const periods = this._resolveCostPeriods();
     this._costPeriods = periods;
-    const periodLabel = { month: "Monthly Cost", quarter: "Quarter Cost" };
+    const periodLabel = {
+      month: "Monthly Cost",
+      quarter: "Quarter Cost",
+      weeks: `${this._weekCycleWeeks()}-Week Cost`,
+    };
     const costPanels = periods
       .map(
         (p) => `
@@ -1163,6 +1172,71 @@ class SolarDashboardCard extends HTMLElement {
     this._updateDetails();
   }
 
+  /**
+   * Which cost cards to render. Accepts a single period, the legacy "both"
+   * (month + quarter), or several joined by "+" / "," e.g. "weeks+month".
+   * Order is preserved, duplicates dropped; falls back to ["quarter"].
+   */
+  _resolveCostPeriods() {
+    const raw = String(this._config.cost_period || "quarter").toLowerCase();
+    const out = [];
+    const add = (p) => {
+      if (!out.includes(p)) out.push(p);
+    };
+    raw
+      .split(/[+,\s]+/)
+      .filter(Boolean)
+      .forEach((tok) => {
+        if (tok === "both") {
+          add("month");
+          add("quarter");
+        } else if (tok === "month" || tok === "quarter" || tok === "weeks") {
+          add(tok);
+        } else if (tok === "week" || tok === "weekly") {
+          add("weeks");
+        }
+      });
+    return out.length ? out : ["quarter"];
+  }
+
+  /** Weeks per billing cycle, clamped to 1-13. */
+  _weekCycleWeeks() {
+    let w = parseInt(this._config.week_cycle_weeks, 10);
+    if (!Number.isFinite(w) || w < 1) w = 4;
+    return Math.min(13, w);
+  }
+
+  /** Days per billing cycle for the "weeks" period. */
+  _weekCycleDays() {
+    return this._weekCycleWeeks() * 7;
+  }
+
+  /**
+   * Local-midnight anchor for the weeks cycle. Accepts "YYYY-MM-DD" (or with
+   * "/" separators); blank or unparseable falls back to 1 Jan of the current
+   * year so the phase stays deterministic until a real cycle start is set.
+   */
+  _weekCycleAnchor() {
+    const now = new Date();
+    const v = String(this._config.week_cycle_start || "").trim();
+    if (v) {
+      const p = v.split(/[-/]/).map((x) => parseInt(x, 10));
+      if (p.length >= 3 && p.every(Number.isFinite)) {
+        const d = new Date(p[0], p[1] - 1, p[2]);
+        if (!Number.isNaN(d.getTime())) return d;
+      }
+    }
+    return new Date(now.getFullYear(), 0, 1);
+  }
+
+  /** Billing period backing a report range, or null for rolling ranges. */
+  _periodForRange(range) {
+    if (range === "billing_month") return "month";
+    if (range === "billing_quarter") return "quarter";
+    if (range === "billing_weeks") return "weeks";
+    return null;
+  }
+
   _quarterAnchor() {
     const v = this._config.quarter_start_date;
     if (v) {
@@ -1179,6 +1253,7 @@ class SolarDashboardCard extends HTMLElement {
   _periodDays(period) {
     try {
       const now = new Date();
+      if (period === "weeks") return this._weekCycleDays();
       if (period === "month") {
         let d = parseInt(this._config.month_start_day, 10);
         if (!Number.isFinite(d) || d < 1) d = 1;
@@ -1207,6 +1282,19 @@ class SolarDashboardCard extends HTMLElement {
   /** Start date (local midnight) of the current billing period. */
   _periodStart(period) {
     const now = new Date();
+    if (period === "weeks") {
+      // Step whole cycles from the anchor with date arithmetic rather than
+      // epoch ms, so a DST change inside a cycle can't shift the boundary.
+      const anchor = this._weekCycleAnchor();
+      const cycle = this._weekCycleDays();
+      const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+      const n = Math.floor(Math.round((today - anchor) / 86400000) / cycle);
+      return new Date(
+        anchor.getFullYear(),
+        anchor.getMonth(),
+        anchor.getDate() + n * cycle
+      );
+    }
     if (period === "month") {
       let d = parseInt(this._config.month_start_day, 10);
       if (!Number.isFinite(d) || d < 1) d = 1;
@@ -1246,6 +1334,9 @@ class SolarDashboardCard extends HTMLElement {
 
   _energySensorsFor(period) {
     const C = this._config;
+    if (period === "weeks") {
+      return [C.import_energy_weeks_sensor, C.export_energy_weeks_sensor];
+    }
     if (period === "month") {
       return [C.import_energy_month_sensor, C.export_energy_month_sensor];
     }
@@ -1664,6 +1755,10 @@ class SolarDashboardCard extends HTMLElement {
       case "billing_month":
         start = this._periodStart("month");
         label = "Billing month";
+        break;
+      case "billing_weeks":
+        start = this._periodStart("weeks");
+        label = `Billing cycle (${this._weekCycleWeeks()} wk)`;
         break;
       case "billing_quarter":
         start = this._periodStart("quarter");
@@ -2186,9 +2281,8 @@ class SolarDashboardCard extends HTMLElement {
       1,
       Math.ceil((win.end.getTime() - win.start.getTime()) / 86400000)
     );
-    if (win.range === "billing_month") days = this._periodElapsedDays("month");
-    if (win.range === "billing_quarter")
-      days = this._periodElapsedDays("quarter");
+    const billingPeriod = this._periodForRange(win.range);
+    if (billingPeriod) days = this._periodElapsedDays(billingPeriod);
 
     // Import cost. In TOU mode we split the imported-power history into bands by
     // the actual local time each interval occurred — this is exact by-time cost.
@@ -2249,12 +2343,10 @@ class SolarDashboardCard extends HTMLElement {
       previous = prevUsage - prevCredit + dailyFee * days - bonus;
     }
     let projected = null;
-    if (win.range === "billing_month") {
-      projected = (net / Math.max(1, this._periodElapsedDays("month"))) * this._periodDays("month");
-    } else if (win.range === "billing_quarter") {
+    if (billingPeriod) {
       projected =
-        (net / Math.max(1, this._periodElapsedDays("quarter"))) *
-        this._periodDays("quarter");
+        (net / Math.max(1, this._periodElapsedDays(billingPeriod))) *
+        this._periodDays(billingPeriod);
     }
     return { importTariff, exportTariff, dailyFee, days, usage, credit, supply, bonus, net, previous, projected, noSolarBill, savings, tou, touExport };
   }
@@ -4337,12 +4429,25 @@ class SolarDashboardCardEditor extends HTMLElement {
         <div class="sdc-sec-h">Cost period</div>
         <div class="sdc-grid">
           ${selectInput("tariff_mode", "Tariff mode", ["single", "tou"])}
-          ${selectInput("cost_period", "Show", ["quarter", "month", "both"])}
+          ${selectInput("cost_period", "Show", [
+            "quarter",
+            "month",
+            "weeks",
+            "both",
+            "month+weeks",
+            "quarter+weeks",
+          ])}
           ${numberInput("month_start_day", "Month start day (1-31)", 1)}
           ${textInput(
             "quarter_start_date",
             "Quarter start (YYYY-MM-DD or MM-DD)",
             "01-01"
+          )}
+          ${numberInput("week_cycle_weeks", "Weeks per billing cycle", 1)}
+          ${textInput(
+            "week_cycle_start",
+            "Cycle start (YYYY-MM-DD)",
+            "2026-07-27"
           )}
         </div>
       </div>`;

@@ -254,9 +254,12 @@ Leave `tariff_mode: single` (the default) to keep the flat `import_tariff`.
 
 ---
 
-## Cost cards — monthly / quarterly + billing dates
+## Cost cards — weekly / monthly / quarterly + billing dates
 
-Choose which cost card(s) appear with `cost_period: quarter | month | both`.
+Choose which cost card(s) appear with
+`cost_period: quarter | month | weeks | both`. `both` is the legacy spelling of
+`month + quarter`; to show any other combination, join them with `+` or `,`
+(e.g. `cost_period: weeks+month`).
 
 Each card shows the **cost so far** in the current billing period: it counts the
 days from the period start (`month_start_day` / `quarter_start_date`) up to and
@@ -271,6 +274,28 @@ cost_period: both
 month_start_day: 1            # billing month starts on the 1st
 quarter_start_date: 2026-07-01  # quarters anchored to an AU financial-year start
 ```
+
+### N-weekly billing (e.g. 4-weekly)
+
+Some retailers bill every N weeks rather than monthly, so the cycle drifts
+against the calendar and a `month_start_day` can never track it. Use the `weeks`
+period instead: set the cycle length and anchor it to the first day of any cycle
+you know, and every later cycle is counted forward from there in N-week steps.
+
+```yaml
+cost_period: weeks            # or "weeks+month" to show both cards
+week_cycle_weeks: 4           # 4-weekly billing (1-13)
+week_cycle_start: 2026-07-27  # first day of a known cycle
+```
+
+With the example above, cycles run 27 Jul → 23 Aug, 24 Aug → 20 Sep, and so on.
+The report range picker also gains a **Billing cycle** option that spans the
+current cycle, and the projected total scales by the full N-week length.
+
+Anchor dates before the current cycle are fine — the phase is what matters, not
+how long ago it was. If `week_cycle_start` is blank the anchor falls back to
+1 January of the current year, which keeps the maths deterministic but almost
+certainly won't match your retailer, so set it.
 
 ### Accurate cost (`utility_meter`)
 
@@ -427,10 +452,14 @@ metrics:
 | `zero_import_bonus_amount` | number | `1` | $/day credited when the bonus is enabled (subtracted from net cost; assumed earned each day in the period). |
 | `zero_import_bonus_window` | string | `"18:00-21:00"` | The window the near-zero-import condition applies to (recorded for reference). |
 | `zero_import_bonus_threshold` | number | `0.03` | Import ceiling in kWh/hour to still qualify (recorded for reference). |
-| `cost_period` | string | `quarter` | Which cost card(s) to show: `quarter`, `month`, or `both`. |
+| `cost_period` | string | `quarter` | Which cost card(s) to show: `quarter`, `month`, `weeks`, or `both` (= month + quarter). Combine with `+` / `,`, e.g. `weeks+month`. |
 | `month_start_day` | number | `1` | Day of month the billing month starts (used for the monthly day-count). |
 | `quarter_start_date` | string | _(Jan 1)_ | Quarter anchor as `YYYY-MM-DD` or `MM-DD`; quarters repeat every 3 months from it. |
 | `quarter_days` | number | `91` | Legacy fallback if the quarter anchor can't be computed. |
+| `week_cycle_weeks` | number | `4` | Weeks per billing cycle when `cost_period` includes `weeks` (clamped 1-13). |
+| `week_cycle_start` | string | _(1 Jan this year)_ | Anchor `YYYY-MM-DD` — the first day of a known billing cycle; later cycles step forward in N-week jumps. |
+| `import_energy_weeks_sensor` | entity | — | Optional kWh import total for the weeks cycle. |
+| `export_energy_weeks_sensor` | entity | — | Optional kWh export total for the weeks cycle. |
 | `import_energy_month_sensor` / `export_energy_month_sensor` | entity | _(none)_ | Optional kWh totals (monthly cycle) → **accurate** monthly cost. |
 | `import_energy_quarter_sensor` / `export_energy_quarter_sensor` | entity | _(none)_ | Optional kWh totals (quarterly cycle) → **accurate** quarter cost. |
 | `import_energy_sensor` / `export_energy_sensor` | entity | _(none)_ | Legacy aliases — used as the quarter sensors if the `*_quarter_*` keys are unset. |
@@ -448,7 +477,7 @@ metrics:
 | `show_graphs` | bool | `true` | Show the statistics & graphs section. |
 | `graphs_collapsed` | bool | `false` | Start the graphs section collapsed. |
 | `graph_poll_interval` | number | `300` | Seconds between history refreshes for the graphs. |
-| `report_default_range` | string | `today` | Initial report range: `today`, `yesterday`, `7d`, `30d`, `billing_month`, `billing_quarter`. |
+| `report_default_range` | string | `today` | Initial report range: `today`, `yesterday`, `7d`, `30d`, `billing_month`, `billing_weeks`, `billing_quarter`. |
 | `report_default_tab` | string | `overview` | Initial report tab: `overview`, `energy`, `cost`, `battery`, `grid`, `solar`, `inverter`, `events`, `metrics`. |
 | `report_show_previous` | bool | `true` | Fetch and compare the previous matching range where relevant. |
 | `battery_capacity_kwh` | number | _(none)_ | Battery capacity used for cycle estimates and full-time forecasts. |
