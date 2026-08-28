@@ -10,7 +10,7 @@
  * License: MIT
  */
 
-const CARD_VERSION = "1.10.0";
+const CARD_VERSION = "1.11.0";
 
 /* eslint-disable no-console */
 console.info(
@@ -1417,6 +1417,27 @@ class SolarDashboardCard extends HTMLElement {
         expId && Number.isFinite(totals[expId]) ? totals[expId] : 0;
       const importKwh =
         impBand.peak + impBand.shoulder + impBand.offpeak + impBand.free;
+      // Exact by-time feed-in credit from the export meter's hourly buckets.
+      // Falls back to the averaged rate (expBand null) if the query fails or
+      // the plan has no export TOU windows at all.
+      let expBand = null;
+      if (expId && exportKwh > 0 && this._hasExportTou()) {
+        try {
+          expBand = await this._fetchExportBandStats(expId, start, end);
+        } catch (e) {
+          expBand = null;
+        }
+      }
+      if (expBand) {
+        // Keep the band split consistent with the headline export total, which
+        // comes from daily `change` rather than the hourly series.
+        const bandSum =
+          expBand.peak + expBand.mid_peak + expBand.shoulder + expBand.offpeak;
+        if (bandSum > 0) {
+          const k = exportKwh / bandSum;
+          for (const b in expBand) expBand[b] *= k;
+        }
+      }
       this._touCardCost = this._touCardCost || {};
       this._touCardCost[period] = {
         usage: this._touCost(impBand, this._touRates()),
@@ -1424,8 +1445,10 @@ class SolarDashboardCard extends HTMLElement {
         importKwh,
         exportKwh,
         impBand,
-        expBand: null, // no per-band export meter → credit uses avg/flat rate
-        exportCredit: null,
+        expBand,
+        exportCredit: expBand
+          ? this._exportTouCredit(expBand, this._exportTouRates())
+          : null,
       };
       this._touCardFetchedAt[period] = Date.now();
       this._updateCostPeriod(period, null, null); // re-render with exact figures
@@ -1434,6 +1457,49 @@ class SolarDashboardCard extends HTMLElement {
     } finally {
       this._touCardFetching[period] = false;
     }
+  }
+
+  /**
+   * Per-band export kWh for a billing period, derived from HOURLY statistics of
+   * the single export meter.
+   *
+   * Without this the feed-in credit values every exported kWh at the
+   * duration-weighted average export rate — the mean rate across the clock —
+   * which ignores *when* the energy actually left the house. A plan paying a
+   * premium in a narrow evening window is then mispriced in both directions:
+   * too little credit when export is concentrated in that window, too much when
+   * it isn't. Splitting the meter's hourly buckets into bands fixes that
+   * without needing a separate meter per export band.
+   *
+   * Each hour is apportioned across whatever bands its 60 minutes fall in, so a
+   * window starting mid-hour still lands correctly. Costs one extra hourly
+   * stats query (~670 rows for a 4-week cycle), so the cheap path stays cheap.
+   */
+  async _fetchExportBandStats(expId, start, end) {
+    if (!expId || !this._hass || !this._hass.callWS) return null;
+    const res = await this._hass.callWS({
+      type: "recorder/statistics_during_period",
+      start_time: start.toISOString(),
+      end_time: end.toISOString(),
+      statistic_ids: [expId],
+      period: "hour",
+      types: ["change"],
+    });
+    const rows = (res && res[expId]) || [];
+    if (!rows.length) return null;
+    const table = this._exportTouMinuteTable();
+    const out = { peak: 0, mid_peak: 0, shoulder: 0, offpeak: 0 };
+    let seen = false;
+    for (const r of rows) {
+      const kwh = Number(r.change);
+      if (!Number.isFinite(kwh) || kwh <= 0) continue;
+      const h = new Date(r.start).getHours(); // local hour of this bucket
+      const mins = { peak: 0, mid_peak: 0, shoulder: 0, offpeak: 0 };
+      for (let m = h * 60; m < h * 60 + 60; m++) mins[table[m % 1440].band]++;
+      for (const b in mins) if (mins[b]) out[b] += (kwh * mins[b]) / 60;
+      seen = true;
+    }
+    return seen ? out : null;
   }
 
   /**

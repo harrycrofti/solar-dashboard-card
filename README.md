@@ -207,8 +207,21 @@ export_tou:
   windows blank to fall back to the flat `export_tariff`.
 - Exports are integrated into bands by the **actual local time** each interval
   occurred, exactly like imports, and shown as per-band **Feed-in** rows in the
-  Cost tab. The cost card uses a duration-weighted average feed-in rate until
-  the by-time history loads.
+  Cost tab.
+- The cost card prices feed-in by band too. When per-band import meters are
+  configured (`tou_import_band_sensors`), it derives the export split from
+  **hourly statistics** of `tou_export_energy_sensor`, apportioning each hour
+  across the bands its minutes fall in. A duration-weighted average rate is used
+  only as a fallback — while the first query is in flight, or if no export
+  windows are set.
+
+  > That fallback is an approximation and can be badly wrong on its own. It
+  > averages the rate across the *clock*, not across your *energy*: if a plan
+  > pays a premium in a narrow evening window and your export is concentrated
+  > there, the average under-credits you — and over-credits you when it isn't.
+  > On one real 4-week bill the averaged rate valued 599 kWh at 6.25 c/kWh
+  > against a true 7.33 c/kWh, overstating the bill by $6.56 (47%). The by-band
+  > figure landed within $0.09 of the invoice.
 
 ### Zero-import bonus
 
